@@ -1,0 +1,31 @@
+# Node（网页 demo 与后续手机端都会用到）
+node_modules/
+dist/
+build/
+.npm-cache/
+*.log
+
+# Python 副产物
+__pycache__/
+*.pyc
+
+# 编辑器与系统
+.DS_Store
+Thumbs.db
+
+# Claude Code 的机器本地桥接目录（skills 走全局安装，见 AGENTS.md）
+.claude/
+
+# 一次性安装实验的暂存区（可随时删）
+_stage/
+
+# 副产物区：一次性案子的脚本、日志、快照。目录留在仓库内，但不进 git —— 报告才是交付物，
+# 它留在 docs/<effort>/。见 docs/agents/workspace-layout.md。
+/archive/*
+# 但把「这个目录是干什么的」那份说明放行，否则 clone 之后没人知道它存在过
+!/archive/README.md
+
+# NOTE: `.scratch/` is deliberately NOT ignored.
+# The local markdown issue tracker stores every spec and ticket under
+# `.scratch/<feature-slug>/` (see docs/agents/issue-tracker.md), so ignoring it
+# would silently drop the whole ticket queue out of git. Do not add it back.
