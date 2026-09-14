@@ -64,3 +64,9 @@ Where each kind of material lives (`projects/` overviews, `docs/` detail, `.scra
 
 主流程：`/grill-with-docs → /to-spec → /to-tickets → /implement → /code-review`。
 25 个 skill 怎么用（14 个用户调用 + 11 个模型调用）见 `docs/Matt-Skills-使用指南.md`。
+
+**副本提醒（重要）。** `DSH` 工作区里也有同一份 25 个 skill 的副本。**改 skill、或升级 skill 之后，
+两个仓库各要更新一次**（在各自目录跑 `npx skills update`，它按 `skills-lock.json` 刷新），否则两边行为会
+悄悄漂移 —— 同一个 `/implement` 在两个目录里跑出不同结果，是最难查的一类不一致。
+之所以选「各存一份」而不是让本仓库 junction 到 `DSH`：本仓库要能**独立存活**（将来推远端、换机器、
+或 `DSH` 被改名/删除），而 junction 不能进 git、跨机器失效。
