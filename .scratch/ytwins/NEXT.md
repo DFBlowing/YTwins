@@ -50,3 +50,8 @@ _最后更新：2026-09-14_
 第一轮讨论（术语统一 + 边界澄清，共三轮 interview）发生在 `DSH` 工作区的会话里，
 交接文档在系统临时目录 `ytwins-handoff.md`。**读完那一份，本仓库的三份文件就够了**：
 `CONTEXT.md`（词）、`docs/ytwins/parent-voice-principles.md`（说话方式）、本文件（进度）。
+
+**迁移过程的复盘**（含"漏搬 `.agents/skills/` 导致新目录调不出 skill"的根因与预防）在 DSH 侧：
+`D:\AppData\Obsidian\AI_Message\DSH\docs\ytwins-migration\retrospective.md`（英文对照 `retrospective.en.md`）。
+它写给"下次把工作区搬到新仓库"的人 —— 本仓库只需要记住结论：`.agents/skills/` 与 `skills-lock.json`
+不是可选项，且升级 skill 后两个仓库各要跑一次 `npx skills update`。
