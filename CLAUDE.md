@@ -8,8 +8,10 @@
 
 ## Claude Code
 
-**技能来源。** 本仓库的 25 个 skill 装在**全局** `~/.claude/skills`，本仓库不带副本。改 skill 就去全局目录改，
-不要往这里复制 SKILL.md。`disable-model-invocation: true` 与 `user-invocable: false` 在 Claude Code 与
+**技能来源。** 25 个 skill 是本仓库自带的，在 `.agents/skills/`；`.claude/skills` 是指向它的目录 junction，
+所以 Claude Code 无需复制任何文件即可加载同一批。**改 skill 只改 `.agents/skills/` 一处**，两边同时生效；
+不要往 `.claude/` 里复制 SKILL.md。版本由 `skills-lock.json` 锁定。
+`disable-model-invocation: true` 与 `user-invocable: false` 在 Claude Code 与
 DSH 中字段名和语义一致，14 个「仅用户调用」的编排 skill 在 `/` 菜单里可用、不会被自动触发。
 
 **协议字段不要翻译。** `Status:`、`Type:`、`Blocked by:`、`## Comments`、`## Answer`、`CONTEXT.md`、

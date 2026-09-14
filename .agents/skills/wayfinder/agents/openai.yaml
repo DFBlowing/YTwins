@@ -1,0 +1,5 @@
+interface:
+  display_name: "探路"
+  short_description: "把大工程规划成决策 ticket"
+policy:
+  allow_implicit_invocation: false

@@ -1,0 +1,5 @@
+interface:
+  display_name: "转问卷"
+  short_description: "把问题前置成给他人填写的问卷"
+policy:
+  allow_implicit_invocation: false

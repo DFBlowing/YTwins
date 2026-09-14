@@ -1,0 +1,3 @@
+interface:
+  display_name: "交互向导"
+  short_description: "生成交互式设置向导"

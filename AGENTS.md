@@ -54,6 +54,13 @@ Where each kind of material lives (`projects/` overviews, `docs/` detail, `.scra
 
 ### Skills
 
-本仓库的主流程用 25 个 Matt Pocock skill。它们装在**全局** `~/.claude/skills`，本仓库不 vendor 副本 ——
-要改 skill 去全局目录改，不要往这里复制 SKILL.md。主流程：
-`/grill-with-docs → /to-spec → /to-tickets → /implement → /code-review`。
+本仓库**自带** 25 个 Matt Pocock skill，装在 `.agents/skills/`，版本由根目录的 `skills-lock.json` 锁定
+（`npx skills update` 按锁刷新）。`.claude/skills` 是指向 `.agents/skills/` 的目录 junction，供 Claude Code 使用；
+`.claude/` 不进 git。
+
+**加载来源要说清楚**：DSH 与 Claude Code 都从**工作区内的** `.agents/skills/` 读技能；用户主目录下的
+`~/.agents/skills` 只有 10 个非 Matt skill（obsidian / byok 那批），两者不是一回事。改 skill 只改
+`.agents/skills/` 一处，不要往 `.claude/` 里复制 SKILL.md。
+
+主流程：`/grill-with-docs → /to-spec → /to-tickets → /implement → /code-review`。
+25 个 skill 怎么用（14 个用户调用 + 11 个模型调用）见 `docs/Matt-Skills-使用指南.md`。

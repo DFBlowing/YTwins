@@ -1,0 +1,5 @@
+interface:
+  display_name: "拷问我"
+  short_description: "用连续追问打磨方案"
+policy:
+  allow_implicit_invocation: false

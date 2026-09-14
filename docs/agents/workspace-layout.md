@@ -29,10 +29,12 @@
 
 这些位置由 skill 硬编码解析，改动会打断主流程：
 
-`AGENTS.md`、`CLAUDE.md`、`CONTEXT.md`、`CONTEXT-MAP.md`、`.git/`、`.scratch/<effort>/spec.md`、
-`.scratch/<effort>/issues/<NN>-<slug>.md`、`.scratch/<effort>/map.md`、`docs/agents/`、`docs/adr/`
+`AGENTS.md`、`CLAUDE.md`、`CONTEXT.md`、`CONTEXT-MAP.md`、`.agents/skills/`、`.claude/skills`、`.git/`、
+`.scratch/<effort>/spec.md`、`.scratch/<effort>/issues/<NN>-<slug>.md`、`.scratch/<effort>/map.md`、
+`docs/agents/`、`docs/adr/`
 
-**新增一层永远比移动一层便宜。** 25 个 skill 本身不在仓库里 —— 它们装在全局 `~/.claude/skills`（见 `AGENTS.md`）。
+**新增一层永远比移动一层便宜。** skill 是本仓库自带的（`.agents/skills/`，由 `skills-lock.json` 锁定版本），
+`.claude/skills` 只是指向它的 junction —— 两者都不许移动。
 
 ## `projects/` —— 每 effort 一份总览
 
@@ -87,8 +89,8 @@
 ## `docs/` —— 按 effort 收拢
 
 - 任何 effort 的产物进 `docs/<effort-slug>/`，slug 与 `.scratch/` 下的一致。
-- `docs/` 根目录**只留工作区级文档，而本仓库目前没有**：正文级材料都在 `docs/agents/`（协议路径）与
-  `docs/<effort>/` 里。要往根加文档，先想清楚它为什么不属于任何一个 effort。
+- `docs/` 根目录只留**工作区级文档**，本仓库目前只有一份：`Matt-Skills-使用指南.md`（25 个 skill 怎么用）。
+  正文级材料在 `docs/agents/`（协议路径）与 `docs/<effort>/` 里；要往根加文档，先想清楚它为什么不属于任何一个 effort。
 - `docs/agents/` 与 `docs/adr/` 是协议路径，不受这条影响，原地不动。
 
 ## `tools/` —— 只收会被第二次用到的程序

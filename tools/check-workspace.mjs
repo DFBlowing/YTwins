@@ -20,13 +20,14 @@ import { fileURLToPath } from 'node:url';
  *  root; `CONTEXT-MAP.md` is allowed so that splitting the glossary into several
  *  contexts later does not trip the checker. */
 const ROOT_ALLOWED_FILES = new Set([
-  'AGENTS.md', 'CLAUDE.md', 'CONTEXT.md', 'CONTEXT-MAP.md', '.gitignore',
+  'AGENTS.md', 'CLAUDE.md', 'CONTEXT.md', 'CONTEXT-MAP.md', '.gitignore', 'skills-lock.json',
   'package.json', 'package-lock.json', 'pnpm-lock.yaml', 'tsconfig.json',
 ]);
 
-/** No doc is allowed loose in the docs/ root: every product doc belongs to an
- *  effort (`docs/<effort>/`), and the conventions live in `docs/agents/`. */
-const DOCS_ROOT_ALLOWED_FILES = new Set();
+/** Workspace-level docs allowed in the docs/ root. Effort products never are. */
+const DOCS_ROOT_ALLOWED_FILES = new Set([
+  'Matt-Skills-使用指南.md',
+]);
 
 /** `.scratch/` holds effort directories plus this one file. */
 const SCRATCH_ROOT_ALLOWED_FILES = new Set(['README.md']);

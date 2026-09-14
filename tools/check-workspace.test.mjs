@@ -142,6 +142,20 @@ test('no doc at all is allowed loose in the docs/ root', () => {
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test('the skills guide is a workspace-level doc and is allowed in the docs/ root', () => {
+  const root = fixture({ ...CLEAN, 'docs/Matt-Skills-使用指南.md': null });
+  try {
+    assert.deepEqual(checkWorkspace(root), []);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('skills-lock.json is a protocol file and is allowed at the root', () => {
+  const root = fixture({ ...CLEAN, 'skills-lock.json': null });
+  try {
+    assert.deepEqual(checkWorkspace(root), []);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('an English pair for a projects overview is a violation', () => {
   const root = fixture({ ...CLEAN, 'projects/ytwins.en.md': null });
   try {
