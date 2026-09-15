@@ -19,6 +19,11 @@ Thumbs.db
 # 一次性安装实验的暂存区（可随时删）
 _stage/
 
+# 本地数据：SQLite 文件库与云端 LLM 的 key（服务端环境变量文件）。两者都只属于这台机器。
+data/
+.env
+.env.local
+
 # 副产物区：一次性案子的脚本、日志、快照。目录留在仓库内，但不进 git —— 报告才是交付物，
 # 它留在 docs/<effort>/。见 docs/agents/workspace-layout.md。
 /archive/*

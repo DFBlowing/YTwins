@@ -1,0 +1,176 @@
+/*
+ * The skeleton's stylesheet. Quiet on purpose: this is a page someone drops
+ * drops into, not a dashboard they are meant to study.
+ */
+
+:root {
+  --ink: #23201c;
+  --ink-soft: #6b645c;
+  --paper: #f7f5f1;
+  --line: #e0dad1;
+  --accent: #4a6b5d;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  line-height: 1.7;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.brand {
+  margin: 0;
+  font-size: 1.1rem;
+  letter-spacing: 0.04em;
+}
+
+.acts {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.act-tab {
+  padding: 0.35rem 1rem;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+.act-tab:hover {
+  color: var(--ink);
+}
+
+.act-tab[aria-current='page'] {
+  border-color: var(--line);
+  background: #fff;
+  color: var(--accent);
+}
+
+.stage {
+  max-width: 42rem;
+  margin: 0 auto;
+  padding: 2.5rem 1.5rem 4rem;
+}
+
+.lede {
+  margin: 0 0 1.5rem;
+  color: var(--ink-soft);
+}
+
+.drop-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.drop-input {
+  width: 100%;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 0.6rem;
+  background: #fff;
+  color: inherit;
+  font: inherit;
+  resize: vertical;
+}
+
+.drop-input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.drop-send {
+  align-self: flex-end;
+  padding: 0.5rem 1.4rem;
+  border: none;
+  border-radius: 0.5rem;
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  cursor: pointer;
+}
+
+.drop-send:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.reply {
+  min-height: 1.7rem;
+  margin: 1rem 0 0;
+  color: var(--accent);
+}
+
+.caught {
+  margin-top: 2.5rem;
+}
+
+.section-title {
+  margin: 0 0 0.75rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--ink-soft);
+}
+
+.drop-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.drop-item {
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 0.6rem;
+  background: #fff;
+}
+
+.drop-item + .drop-item {
+  margin-top: 0.5rem;
+}
+
+.drop-body {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.drop-when {
+  display: block;
+  margin-top: 0.4rem;
+  font-size: 0.8rem;
+  color: var(--ink-soft);
+}
+
+.empty,
+.not-yet {
+  color: var(--ink-soft);
+  font-style: normal;
+}
+
+.not-yet {
+  padding: 1rem;
+  border: 1px dashed var(--line);
+  border-radius: 0.6rem;
+}

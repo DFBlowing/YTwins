@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>YTwins</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <!--
+      三幕的页面骨架。三个视图在这里一次成型，但只有第一幕接真实链路。
+      第二幕（问）与第三幕（浮）是空壳 —— 它们不接假数据、不实现逻辑，
+      分别在 07 与 06 里被填实。空的地方就渲染成空，未实现的明确写成未实现。
+    -->
+    <header class="topbar">
+      <h1 class="brand">YTwins</h1>
+      <nav class="acts" aria-label="三幕">
+        <button class="act-tab" data-act="drop" aria-current="page">丢</button>
+        <button class="act-tab" data-act="ask">问</button>
+        <button class="act-tab" data-act="surface">浮</button>
+      </nav>
+    </header>
+
+    <main class="stage">
+      <!-- 第一幕：丢。唯一接真实链路的一幕。 -->
+      <section class="act" data-act-panel="drop">
+        <p class="lede">把任何没格式的碎片丢进来。不用分类，不用填时间。</p>
+
+        <form class="drop-form" id="drop-form">
+          <textarea
+            id="drop-input"
+            class="drop-input"
+            name="body"
+            rows="4"
+            placeholder="比如：老师今天讲了期末怎么算分，下周三交提纲，好烦"
+            aria-label="投递内容"
+          ></textarea>
+          <button type="submit" class="drop-send" id="drop-send">丢进去</button>
+        </form>
+
+        <p class="reply" id="drop-reply" role="status" aria-live="polite"></p>
+
+        <section class="caught">
+          <h2 class="section-title">接住了什么</h2>
+          <ul class="drop-list" id="drop-list"></ul>
+          <p class="empty" id="drop-empty">还没有丢过东西。</p>
+        </section>
+      </section>
+
+      <!-- 第二幕：问。空壳，07 里填实。 -->
+      <section class="act" data-act-panel="ask" hidden>
+        <p class="lede">对这一段时间的留档提问，得到回答并看到它来自哪一次投递。</p>
+        <p class="not-yet" id="ask-not-yet">这一幕还没实现。</p>
+      </section>
+
+      <!-- 第三幕：浮。空壳，06 里填实。 -->
+      <section class="act" data-act-panel="surface" hidden>
+        <p class="lede">在情绪投递或你主动询问时，用不确定的语气浮出一条小结论。</p>
+        <p class="not-yet" id="surface-not-yet">这一幕还没实现。</p>
+      </section>
+    </main>
+
+    <script type="module" src="/main.ts"></script>
+  </body>
+</html>

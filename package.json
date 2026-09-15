@@ -1,0 +1,20 @@
+{
+  "name": "ytwins",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "YTwins — drop fragments in, get conclusions back, silently.",
+  "scripts": {
+    "test": "node src/domain/domain.test.ts",
+    "server": "node src/web/server.ts",
+    "dev:web": "vite",
+    "build:web": "vite build",
+    "typecheck": "tsc --noEmit",
+    "check": "node tools/check-workspace.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.0"
+  }
+}

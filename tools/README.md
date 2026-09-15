@@ -14,7 +14,11 @@
 - 单文件工具直接放 `tools/` 根；多文件工具各自一个目录，目录里带 `README.md`。
 - 每个工具在上面的表里占一行，写清「做什么」和「怎么跑」。
 - 测试与实现同目录，命名 `<name>.test.mjs`。
-- 仓库没有 `package.json`，也没有类型检查器：语法用 `node --check <file>` 校验。
+- 仓库现在有 `package.json` 了（`src/` 的 TypeScript 工程，见 ticket 01），所以 `tools/` 下的 `.mjs`
+  可以照旧由 Node 直接跑，也可以用 `npm run typecheck` 顺带检查类型 —— 但 `tools/` 本身仍是纯 JS，
+  不进 `tsconfig.json` 的 `include`。类型检查覆盖 `src/`。
+- **`src/` 下的测试是 `<name>.test.ts`**（`src/domain/domain.test.ts`），不套用上面的 `.mjs` 命名 ——
+  它要跟着被测代码一起过类型检查。**这条例外不改 `tools/` 的规矩**：`tools/` 里仍用 `.mjs`。
 
 ```bash
 # 跑检查器
@@ -22,6 +26,12 @@ node tools/check-workspace.mjs
 
 # 跑测试
 node tools/check-workspace.test.mjs
+
+# 跑领域测试（单进程、自带断言、退出码表达结果）
+node src/domain/domain.test.ts
+
+# 类型检查（只覆盖 src/）
+npm run typecheck
 ```
 
 > **`node --test` 在受限沙箱里会报 `spawn EPERM`。** 那是沙箱禁止子进程管道，不是测试失败 ——

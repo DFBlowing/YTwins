@@ -22,6 +22,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT_ALLOWED_FILES = new Set([
   'AGENTS.md', 'CLAUDE.md', 'CONTEXT.md', 'CONTEXT-MAP.md', '.gitignore', 'skills-lock.json',
   'package.json', 'package-lock.json', 'pnpm-lock.yaml', 'tsconfig.json',
+  'vite.config.ts',
 ]);
 
 /** Workspace-level docs allowed in the docs/ root. Effort products never are. */

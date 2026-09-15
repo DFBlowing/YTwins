@@ -30,7 +30,7 @@ function rules(root) {
 /** A tree that satisfies every rule. Each test below mutates one thing. */
 const CLEAN = {
   'AGENTS.md': null, 'CLAUDE.md': null, 'CONTEXT.md': null,
-  '.gitignore': null, 'package.json': null,
+  '.gitignore': null, 'package.json': null, 'vite.config.ts': null,
   'src/': null,
   'projects/': null, 'projects/ytwins.md': null,
   '.scratch/': null, '.scratch/README.md': null,
