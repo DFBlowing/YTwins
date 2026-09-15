@@ -35,10 +35,23 @@ import type {
   DropResult,
   DropSummary,
   Item,
+  LinkedTerm,
   RecallOptions,
   RecallResult,
   RecallSource,
+  Term,
+  TermLink,
 } from './interface.ts';
+import {
+  DEFAULT_LINK_POLICY,
+  SAME_DROP_REASON,
+  SAME_DROP_STRENGTH,
+  cosineSimilarity,
+  decideLink,
+  pairKey,
+  similarityReason,
+  type LinkPolicy,
+} from './linking.ts';
 import {
   REPLY_INSTRUCTIONS,
   briefFor,
@@ -47,7 +60,7 @@ import {
   safeReply,
   type ReplySituation,
 } from './parent-voice.ts';
-import type { DropStore, StoredDrop, StoredItem } from './storage.ts';
+import type { DropStore, NewLink, StoredDrop, StoredItem, StoredTerm } from './storage.ts';
 
 /** How many times a provider is asked to answer one drop. One attempt, one retry. */
 const REPLY_ATTEMPTS = 2;
@@ -71,10 +84,22 @@ export interface DomainCoreOptions {
    * is configured, and ticket 01's tests drive both with and without one.
    */
   readonly provider?: AiProvider;
+  /**
+   * Where the similarity bands sit, and what the grey zone does.
+   *
+   * Handed in rather than read from inside, so the rule can be changed without
+   * touching the linking path — and so a caller can pin one to see what a
+   * different rule would have produced. Defaults to `DEFAULT_LINK_POLICY`.
+   */
+  readonly linkPolicy?: LinkPolicy;
 }
 
 /** What a drop caught, assembled for the interface. */
-function toSummary(drop: StoredDrop, items: readonly StoredItem[]): DropSummary {
+function toSummary(
+  drop: StoredDrop,
+  items: readonly StoredItem[],
+  terms: readonly StoredTerm[],
+): DropSummary {
   return {
     id: drop.id,
     body: drop.body,
@@ -85,6 +110,7 @@ function toSummary(drop: StoredDrop, items: readonly StoredItem[]): DropSummary 
     // second column that could disagree with the first.
     extracted: drop.inputType !== null,
     items: items.map(toItem),
+    terms: terms.map(toTerm),
     // A null reply is a row written before ticket 03, and the line code can
     // vouch for is the honest answer for it: the drop is old, not unanswered.
     reply: drop.reply ?? safeLineFor(drop.body),
@@ -100,6 +126,20 @@ function toItem(stored: StoredItem): Item {
   };
 }
 
+/** Present a stored term as something the page may read — the vector stays behind. */
+function toTerm(stored: StoredTerm): Term {
+  return {
+    id: stored.id,
+    text: stored.text,
+    dropId: stored.dropId,
+    firstSeenAt: stored.firstSeenAt,
+  };
+}
+
+function toLinkedTerm(stored: StoredTerm): LinkedTerm {
+  return { id: stored.id, text: stored.text };
+}
+
 /**
  * Build the domain core.
  *
@@ -108,6 +148,7 @@ function toItem(stored: StoredItem): Item {
  */
 export function createDomain(options: DomainCoreOptions): Domain {
   const { store, provider } = options;
+  const linkPolicy = options.linkPolicy ?? DEFAULT_LINK_POLICY;
 
   /**
    * Read one drop, and write down what was read.
@@ -138,24 +179,232 @@ export function createDomain(options: DomainCoreOptions): Domain {
       return;
     }
 
+    let said: readonly StoredTerm[];
     try {
-      await store.recordExtraction(drop.id, {
+      said = await store.recordExtraction(drop.id, {
         inputType: reading.inputType,
         items: reading.items,
+        terms: reading.terms,
       });
     } catch {
       // The provider answered but the write failed. Swallowing this keeps the
       // port's promise that extraction never rejects, and leaves the drop
       // unread so a later attempt can still succeed. Nothing was half-written:
-      // the store writes items and the type in one step.
+      // the store writes items, terms and the links between them in one step.
+      return;
+    }
+
+    // The zero-model half of linking: the terms the user said together. Written
+    // here rather than by the store because it is the product's rule and its
+    // wording, and it is a step of its own because a link that fails to write
+    // costs a link — never the terms, which are already stored.
+    await recordSameDropLinks(said);
+
+    // The semantic half costs a provider call, so it runs on its own and on its
+    // own time. A drop whose terms were read is a success whether or not
+    // anything could be compared.
+    void linkInto(said);
+  }
+
+  /**
+   * Link the terms one drop said, because they were said together.
+   *
+   * The zero-model half, and the strongest evidence the product has: two things
+   * said in one breath were certainly said together, so there is nothing to
+   * measure and nobody to ask. The strength is a fixed 1 and the reason is a
+   * fact about the user's own sentence.
+   *
+   * A hard edge **outranks** a similarity edge for the same pair. When the pair
+   * was already linked because the words merely looked close, saying them
+   * together replaces that reading with the fact — the reverse cannot happen,
+   * because `linkInto` leaves a pair that is already linked alone.
+   *
+   * Never throws: a link that could not be written is simply missing, and the
+   * terms it would have joined are stored either way.
+   */
+  async function recordSameDropLinks(said: readonly StoredTerm[]): Promise<void> {
+    if (said.length < 2) return;
+    const links: NewLink[] = [];
+    for (let left = 0; left < said.length; left += 1) {
+      for (let right = left + 1; right < said.length; right += 1) {
+        const from = said[left];
+        const to = said[right];
+        if (from === undefined || to === undefined) continue;
+        links.push({
+          fromTermId: from.id,
+          toTermId: to.id,
+          kind: 'same-drop',
+          strength: SAME_DROP_STRENGTH,
+          reason: SAME_DROP_REASON,
+        });
+      }
+    }
+    try {
+      await store.recordLinks(links);
+    } catch {
+      // Swallowed on purpose: the user's material is what matters, and the
+      // links are the domain's reading of it.
     }
   }
 
-  /** Assemble one drop with its items, or null when there is no such drop. */
+  /**
+   * Connect the terms a drop just yielded to the material already there.
+   *
+   * The hard edges between terms said in the same breath are not this
+   * function's work — the store already has them, put there by code with no
+   * provider involved. What is left is the semantic half.
+   *
+   * Order of decisions, and why:
+   *
+   *  - Nothing is encoded while there is no **other** term to compare against.
+   *    The first fragment a user ever drops therefore costs no model call at
+   *    all, and a term stays unembedded until it can actually be used.
+   *  - Encoding is all-or-nothing. A provider that fails, hangs, or returns a
+   *    vector per text that does not line up costs the links this round, never
+   *    the terms — they were stored before this ran.
+   *  - The bands are read from the policy, so the grey zone is the only place a
+   *    judge is asked and a score that cleared the high band never is.
+   *  - A pair that is already linked is left alone. Two terms said together
+   *    keep the hard edge that recorded that, even if a reading of their
+   *    vectors would have called the same pair merely similar.
+   *
+   * Never throws: every failure ends in "fewer links than there could have
+   * been", which is a state the product is designed to tolerate.
+   */
+  async function linkInto(said: readonly StoredTerm[]): Promise<void> {
+    if (provider === undefined) return;
+    if (said.length === 0) return;
+
+    const mine = new Set(said.map((term) => term.id));
+    // Every term, with its vector. The whole list is read once per drop, because
+    // a new term is compared against everything rather than against a window:
+    // a link to something said months ago is the point of accumulating at all.
+    // That is cheap at this size and is the first thing to revisit if the term
+    // count ever runs into the tens of thousands.
+    const all = await store.listTerms();
+    const others = all.filter((term) => !mine.has(term.id));
+    // Nobody to link to yet. Encoding here would be a provider call spent to
+    // learn nothing, and the term will be encoded when it first has a partner.
+    if (others.length === 0) return;
+
+    const needing = [...said, ...others].filter((term) => term.vector === null);
+    if (needing.length === 0) return;
+
+    let vectors: readonly (readonly number[])[];
+    try {
+      ({ vectors } = await provider.embed({ texts: needing.map((term) => term.text) }));
+    } catch {
+      return;
+    }
+    // A vector per text, in the order asked, and every one of them usable. A
+    // short list or a ragged one is a provider that misunderstood the call, and
+    // guessing at the missing entries would be inventing measurements.
+    if (vectors.length !== needing.length) return;
+    const width = vectors[0]?.length ?? 0;
+    if (width === 0 || vectors.some((vector) => vector.length !== width)) return;
+
+    const embedded = new Map<string, readonly number[]>();
+    for (const [index, term] of needing.entries()) {
+      const vector = vectors[index];
+      if (vector !== undefined) embedded.set(term.id, vector);
+    }
+
+    try {
+      await store.recordTermVectors(
+        [...embedded].map(([termId, vector]) => ({ termId, vector })),
+      );
+    } catch {
+      // The vectors are how the domain compares, not what the user said. Losing
+      // them costs this round's links; it does not cost the terms.
+      return;
+    }
+
+    /** What a term is measured as now: this round's vector, or the stored one. */
+    const vectorOf = (term: StoredTerm): readonly number[] | null =>
+      embedded.get(term.id) ?? term.vector;
+
+    const alreadyLinked = new Set(
+      (await store.listLinks()).map((link) => pairKey(link.fromTermId, link.toTermId)),
+    );
+    /** Pairs already read this round, so a grey pair is never judged twice. */
+    const compared = new Set<string>();
+    const links: NewLink[] = [];
+
+    // Every pair is decided in the round where the **later** of its two ends
+    // gains a vector, because that is the first moment both are known. So the
+    // loop runs from what was just encoded against everything that now has one —
+    // which is also how two older terms whose vectors were both missing still
+    // get their only chance, on the round that finally encoded them together.
+    for (const term of needing) {
+      const vector = vectorOf(term);
+      if (vector === null) continue;
+      for (const other of all) {
+        if (other.id === term.id) continue;
+        // Two terms from this drop already have their hard edge: code put it
+        // there, and a similarity reading would only be a weaker second opinion.
+        if (mine.has(term.id) && mine.has(other.id)) continue;
+        const otherVector = vectorOf(other);
+        if (otherVector === null) continue;
+        const key = pairKey(term.id, other.id);
+        if (alreadyLinked.has(key) || compared.has(key)) continue;
+        compared.add(key);
+
+        // Null means the two cannot be compared at all — vectors of different
+        // widths, which is what a swapped embedding implementation leaves
+        // behind, or one with no direction. Neither is a score, so neither may
+        // become a link.
+        const similarity = cosineSimilarity(vector, otherVector);
+        if (similarity === null) continue;
+
+        const decision = decideLink(similarity, linkPolicy);
+        if (decision === 'skip') continue;
+
+        let judged = false;
+        if (decision === 'ask') {
+          try {
+            const verdict = await provider.judgeLink({
+              from: term.text,
+              to: other.text,
+              similarity,
+            });
+            if (!verdict.related) continue;
+            judged = true;
+          } catch {
+            // A question nobody answered is not an answer. The pair stays
+            // unlinked, which is exactly what a "no" would have produced.
+            continue;
+          }
+        }
+
+        links.push({
+          fromTermId: term.id,
+          toTermId: other.id,
+          kind: 'similar',
+          strength: similarity,
+          reason: similarityReason(similarity, judged),
+        });
+        alreadyLinked.add(key);
+      }
+    }
+
+    if (links.length === 0) return;
+    try {
+      await store.recordLinks(links);
+    } catch {
+      // Same as above: a link that could not be written is a link the next
+      // comparison round can find again, and never a reason to lose a drop.
+    }
+  }
+
+  /** Assemble one drop with its items and terms, or null when there is none. */
   async function readDrop(dropId: string): Promise<DropSummary | null> {
     const drop = await store.findDrop(dropId);
     if (drop === null) return null;
-    return toSummary(drop, await store.listItemsForDrop(dropId));
+    return toSummary(
+      drop,
+      await store.listItemsForDrop(dropId),
+      await store.listTermsForDrop(dropId),
+    );
   }
 
   /**
@@ -261,13 +510,19 @@ export function createDomain(options: DomainCoreOptions): Domain {
       const items = await store.listItems();
       // Group once rather than querying per drop: the page asks for every drop
       // on every load, and the number of drops only grows.
-      const byDrop = new Map<string, StoredItem[]>();
+      const itemsByDrop = new Map<string, StoredItem[]>();
       for (const item of items) {
-        const bucket = byDrop.get(item.dropId);
-        if (bucket === undefined) byDrop.set(item.dropId, [item]);
+        const bucket = itemsByDrop.get(item.dropId);
+        if (bucket === undefined) itemsByDrop.set(item.dropId, [item]);
         else bucket.push(item);
       }
-      return drops.map((drop) => toSummary(drop, byDrop.get(drop.id) ?? []));
+      // Terms are grouped the same way, and for the same reason. Grouped by the
+      // **mention**, not by a term's origin: what this asks is what each drop
+      // said, and a term said twice was said by both drops.
+      const termsByDrop = await store.listTermsByDrop();
+      return drops.map((drop) =>
+        toSummary(drop, itemsByDrop.get(drop.id) ?? [], termsByDrop.get(drop.id) ?? []),
+      );
     },
 
     async getDrop(dropId: string): Promise<DropSummary | null> {
@@ -276,6 +531,32 @@ export function createDomain(options: DomainCoreOptions): Domain {
 
     async listItems(): Promise<readonly Item[]> {
       return (await store.listItems()).map(toItem);
+    },
+
+    async listLinks(): Promise<readonly TermLink[]> {
+      // Both ends are named by looking the terms up once and sharing the map:
+      // what a link needs from a term is its wording, and reading the whole term
+      // list once is cheaper than a lookup per end.
+      const byId = new Map((await store.listTerms()).map((term) => [term.id, term]));
+      const links: TermLink[] = [];
+      for (const link of await store.listLinks()) {
+        const from = byId.get(link.fromTermId);
+        const to = byId.get(link.toTermId);
+        // A link with an end that cannot be named is not shown: the store
+        // cascades links away with their terms, so this only happens to a
+        // database that lost a row by hand, and a nameless link is not
+        // something the page could render honestly anyway.
+        if (from === undefined || to === undefined) continue;
+        links.push({
+          id: link.id,
+          kind: link.kind,
+          strength: link.strength,
+          reason: link.reason,
+          from: toLinkedTerm(from),
+          to: toLinkedTerm(to),
+        });
+      }
+      return links;
     },
 
     async extract(dropId: string): Promise<DropSummary | null> {

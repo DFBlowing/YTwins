@@ -63,6 +63,23 @@ const DEMO_DUE = '2026-09-23T09:00:00.000Z';
 const DEMO_ITEMS = [{ text: '下周三交提纲', dueAt: DEMO_DUE }] as const;
 
 /**
+ * The **terms** act one shows were read out of it (ticket 04).
+ *
+ * Written the way the fragment was said rather than tidied into categories:
+ * 「期末怎么算分」 rather than 「考试信息」, and 「好烦」 kept as a term of its own,
+ * because a feeling the user repeated is exactly the kind of thing that should
+ * be able to gather connections. Four terms, so the six links between them stay
+ * readable on the page.
+ *
+ * No embedding is scripted here, and none is needed: every one of these terms
+ * was said in the same drop, so the links between them are the zero-model kind
+ * and the semantic half has nothing to compare yet. It gets something to
+ * compare as soon as a second fragment arrives — which is ticket 05's and 06's
+ * material, and where a vector per term belongs.
+ */
+const DEMO_TERMS = ['期末怎么算分', '平时分 40%', '下周三交提纲', '好烦'] as const;
+
+/**
  * What to look for in the records.
  *
  * Whole phrases rather than single words on purpose. A single "期末" would match
@@ -123,7 +140,7 @@ export function createDemoProvider(): AiProvider {
     extractByBody: {
       [DEMO_DROP]: {
         kind: 'read',
-        reading: { inputType: 'item', items: DEMO_ITEMS },
+        reading: { inputType: 'item', items: DEMO_ITEMS, terms: DEMO_TERMS },
       },
     },
     parseQuestionByQuestion: {

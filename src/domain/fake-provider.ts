@@ -12,7 +12,9 @@
  * Ticket 07 adds the two ends of recall, scripted the same way. Ticket 03 makes
  * answering scriptable **per attempt**, which is what lets a test walk the
  * "check → regenerate once → degrade" path, and offers the reply that
- * deliberately breaks the rules as a script of its own.
+ * deliberately breaks the rules as a script of its own. Ticket 04 adds the two
+ * ends of linking: a vector per text, and a verdict per pair — both scripted,
+ * so a link's existence and strength are numbers the check chose.
  *
  * @module domain/fake-provider
  */
@@ -21,14 +23,19 @@ import type {
   AiProvider,
   ComposeAnswerRequest,
   ComposeAnswerResult,
+  EmbedRequest,
+  EmbedResult,
   ExtractRequest,
   ExtractResult,
+  JudgeLinkRequest,
+  JudgeLinkResult,
   ParseQuestionRequest,
   ParseQuestionResult,
   RespondRequest,
   RespondResult,
 } from './ai-provider.ts';
 import type { InputType } from './interface.ts';
+import { pairKey } from './linking.ts';
 
 /**
  * How a scripted call fails or stalls.
@@ -72,10 +79,24 @@ export const REPLY_THAT_BREAKS_THE_RULES: RespondScript = {
 export interface ExtractReading {
   readonly inputType: InputType;
   readonly items: readonly { readonly text: string; readonly dueAt: string | null }[];
+  /**
+   * The terms it read out, in the user's own words. Optional and defaulting to
+   * none, because a fragment with nothing worth bringing up again is the honest
+   * default — a check that wants terms asks for them.
+   */
+  readonly terms?: readonly string[];
 }
 
 /** What the fake should do for one input, when reading. */
 export type ExtractScript = FailureScript | { readonly kind: 'read'; readonly reading: ExtractReading };
+
+/** What the fake should hand back for the texts it was asked to encode. */
+export type EmbedScript =
+  | FailureScript
+  | { readonly kind: 'vectors'; readonly vectors: readonly (readonly number[])[] };
+
+/** What the fake should rule about one pair of terms. */
+export type JudgeLinkScript = FailureScript | { readonly kind: 'verdict'; readonly related: boolean };
 
 /** What the fake should make of one question. */
 export type ParseQuestionScript =
@@ -86,7 +107,13 @@ export type ParseQuestionScript =
 export type ComposeScript = FailureScript | { readonly kind: 'answer'; readonly answer: string };
 
 /** Every script this fake understands, so the failure guard can see them all. */
-export type AnyScript = RespondScript | ExtractScript | ParseQuestionScript | ComposeScript;
+export type AnyScript =
+  | RespondScript
+  | ExtractScript
+  | ParseQuestionScript
+  | ComposeScript
+  | EmbedScript
+  | JudgeLinkScript;
 
 /** Configure the fake: a default, plus per-body overrides. */
 export interface FakeProviderScript {
@@ -125,6 +152,27 @@ export interface FakeProviderScript {
    * the pinned moment — and those only exist per call.
    */
   readonly onCompose?: (request: ComposeAnswerRequest) => void;
+  /**
+   * What to encode a text as. Keyed by the text itself, so the same term always
+   * gets the same vector and the resulting similarity is a number the check
+   * chose rather than one it hopes for. A text with no entry fails the whole
+   * call rather than getting an invented vector.
+   */
+  readonly embedFallback?: EmbedScript;
+  readonly embedByText?: Readonly<Record<string, EmbedScript>>;
+  /**
+   * What to rule about a pair. Keyed by both texts in the one order a pair has
+   * (`pairKey`), so a check does not have to know which end the domain happens
+   * to call `from` — the two ends are interchangeable and the key says so.
+   */
+  readonly judgeLinkFallback?: JudgeLinkScript;
+  readonly judgeLinkByPair?: Readonly<Record<string, JudgeLinkScript>>;
+}
+
+/** One pair put to `judgeLink`, as the fake saw it. */
+export interface JudgedPair {
+  readonly from: string;
+  readonly to: string;
 }
 
 /** A handle on the fake, so tests can observe what it was asked. */
@@ -135,6 +183,10 @@ export interface FakeProvider extends AiProvider {
   readonly read: readonly string[];
   /** Every question the domain asked it to parse, in order. */
   readonly askedQuestions: readonly string[];
+  /** Every text the domain asked it to encode, in order. */
+  readonly embedded: readonly string[];
+  /** Every pair the domain put to `judgeLink`, in the order it asked. */
+  readonly judged: readonly JudgedPair[];
 }
 
 /**
@@ -144,7 +196,7 @@ export interface FakeProvider extends AiProvider {
  * model every real-world case, and a drop that turns out to contain nothing is
  * the honest default — a test that wants items asks for them explicitly.
  */
-const UNSCRIPTED_READING: ExtractReading = { inputType: 'item', items: [] };
+const UNSCRIPTED_READING: ExtractResult = { inputType: 'item', items: [], terms: [] };
 
 function fail(script: FailureScript): never {
   switch (script.kind) {
@@ -190,7 +242,11 @@ function runRespond(script: RespondScript | undefined): Promise<RespondResult> {
 function runExtract(script: ExtractScript | undefined): Promise<ExtractResult> {
   if (script === undefined) return Promise.resolve(UNSCRIPTED_READING);
   if (isFailure(script)) return fail(script);
-  return Promise.resolve(script.reading);
+  return Promise.resolve({
+    inputType: script.reading.inputType,
+    items: script.reading.items,
+    terms: script.reading.terms ?? [],
+  });
 }
 
 /**
@@ -232,12 +288,16 @@ export function createFakeProvider(script: FakeProviderScript = {}): FakeProvide
   const seen: string[] = [];
   const read: string[] = [];
   const askedQuestions: string[] = [];
+  const embedded: string[] = [];
+  const judged: JudgedPair[] = [];
   /** How many times each body has been answered, which picks its attempt script. */
   const answered = new Map<string, number>();
   return {
     seen,
     read,
     askedQuestions,
+    embedded,
+    judged,
     // Deliberately NOT `async`. An `async` method would turn the `throw` script
     // into a rejected promise, and the whole point of that script is to hand the
     // domain a genuinely synchronous throw — the shape that a naive
@@ -269,6 +329,44 @@ export function createFakeProvider(script: FakeProviderScript = {}): FakeProvide
     composeAnswer(request: ComposeAnswerRequest): Promise<ComposeAnswerResult> {
       script.onCompose?.(request);
       return runCompose(script.composeFallback);
+    },
+    // Not `async`, for the same reason as `respond`: `fail` may throw
+    // synchronously, and hiding that behind a promise would make the fake
+    // unable to reproduce the shape the domain has to survive.
+    embed(request: EmbedRequest): Promise<EmbedResult> {
+      const vectors: (readonly number[])[] = [];
+      for (const text of request.texts) {
+        embedded.push(text);
+        const scripted = script.embedByText?.[text] ?? script.embedFallback;
+        if (scripted === undefined) {
+          // Unscripted encoding **fails** rather than inventing a vector, for
+          // the same reason composition does: a made-up vector would be a
+          // made-up judgement about the user's material, and a check asserting
+          // links would then pass for a reason it never set up.
+          return Promise.reject(new Error(`no embed script for ${text}: the fake will not invent a vector`));
+        }
+        if (isFailure(scripted)) return fail(scripted);
+        const [vector] = scripted.vectors;
+        if (vector === undefined) {
+          return Promise.reject(new Error(`the embed script for ${text} offered no vector`));
+        }
+        vectors.push(vector);
+      }
+      return Promise.resolve({ vectors });
+    },
+    judgeLink(request: JudgeLinkRequest): Promise<JudgeLinkResult> {
+      judged.push({ from: request.from, to: request.to });
+      // One lookup, in the pair's one order: the domain may hand the two ends
+      // over either way round, and a check should not have to guess which.
+      const scripted =
+        script.judgeLinkByPair?.[pairKey(request.from, request.to)] ?? script.judgeLinkFallback;
+      if (scripted === undefined) {
+        // Same rule again: a verdict is a judgement, and a fake that defaulted
+        // to one would be deciding links the check never asked it to decide.
+        return Promise.reject(new Error('no judge script: the fake will not invent a verdict'));
+      }
+      if (isFailure(scripted)) return fail(scripted);
+      return Promise.resolve({ related: scripted.related });
     },
   };
 }

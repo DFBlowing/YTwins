@@ -27,6 +27,15 @@
  * place only once the parent-voice checks have passed it. The page therefore
  * shows the drop's reply rather than the POST response alone — a reload has to
  * show the same sentence, and the drop is where it is kept.
+ *
+ * What act one shows after ticket 04: each drop lists the **terms** it yielded,
+ * in the user's own words, and a section below lists the **links** that have
+ * grown between terms — each with why it exists and how strong it is. The
+ * accumulation is meant to be invisible while it happens; what it produced is
+ * not, or the user would have no way to tell a connection they agree with from
+ * one the product invented. The hard edges are on screen as soon as a drop has
+ * been read; the semantic ones follow within the moment the page gives them
+ * (`LINK_GRACE_POLLS`), and a refresh shows everything that was decided later.
  */
 
 /** One item parsed out of a drop, as the server reports it. */
@@ -37,12 +46,49 @@ interface Item {
   readonly dropId: string;
 }
 
+/**
+ * One term read out of a drop, as the server reports it.
+ *
+ * No vector travels with it — how the domain compares terms is not something
+ * the page is owed, and showing the numbers would make an internal measurement
+ * look like part of the product.
+ */
+interface Term {
+  readonly id: string;
+  readonly text: string;
+  readonly dropId: string;
+  readonly firstSeenAt: string;
+}
+
+/** One end of a link, as the server reports it. */
+interface LinkedTerm {
+  readonly id: string;
+  readonly text: string;
+}
+
+/**
+ * One link between two terms, as the server reports it.
+ *
+ * Carries its reason because a connection nobody can account for is a
+ * connection nobody can trust: the page shows why the two are joined, not just
+ * that they are.
+ */
+interface TermLink {
+  readonly id: string;
+  readonly kind: 'same-drop' | 'similar';
+  readonly strength: number;
+  readonly reason: string;
+  readonly from: LinkedTerm;
+  readonly to: LinkedTerm;
+}
+
 /** A drop as the server reports it. */
 interface DropSummary {
   readonly id: string;
   readonly body: string;
   readonly droppedAt: string;
   readonly items: readonly Item[];
+  readonly terms: readonly Term[];
   readonly extracted: boolean;
   /** The line this drop answered with — the product's smaller voice. */
   readonly reply: string;
@@ -80,6 +126,8 @@ const send = mustFind<HTMLButtonElement>('#drop-send');
 const reply = mustFind<HTMLParagraphElement>('#drop-reply');
 const list = mustFind<HTMLUListElement>('#drop-list');
 const empty = mustFind<HTMLParagraphElement>('#drop-empty');
+const linkList = mustFind<HTMLUListElement>('#link-list');
+const linkEmpty = mustFind<HTMLParagraphElement>('#link-empty');
 
 const askForm = mustFind<HTMLFormElement>('#ask-form');
 const askInput = mustFind<HTMLInputElement>('#ask-input');
@@ -105,6 +153,19 @@ const POLL_INTERVAL_MS = 250;
  * past that the page shows what the drop has, which is always a real line.
  */
 const REPLY_GRACE_POLLS = 4;
+
+/**
+ * How many extra rounds to give the links once a drop's reading is in.
+ *
+ * Linking is a **second** background job behind the reading, and it is behind
+ * it by construction: a term has to be stored before it can be compared with
+ * anything. So the links a drop produced are not all there the instant the drop
+ * settles — the hard edges are, because code wrote them with the terms, while a
+ * similarity edge waits on an embedding call. Rather than guess at a delay, the
+ * list is re-read a few times over the next second. A link decided after that
+ * appears on the next load, and nothing on screen is ever a placeholder.
+ */
+const LINK_GRACE_POLLS = 4;
 
 /** Format a due time in Chinese terms, or say plainly that none was found. */
 function formatDue(dueAt: string | null): string {
@@ -133,6 +194,52 @@ function renderItem(item: Item): HTMLLIElement {
 }
 
 /**
+ * Render one term the drop yielded.
+ *
+ * The user's own words, shown as they were said. Deliberately with no category
+ * and no score beside it: a term is something that can be brought up again, not
+ * a label the product has put on the user.
+ */
+function renderTerm(term: Term): HTMLLIElement {
+  const chip = document.createElement('li');
+  chip.className = 'term-chip';
+  chip.textContent = term.text;
+  return chip;
+}
+
+/**
+ * Render one link between two terms.
+ *
+ * Both wordings and the reason, because "these two are connected" on its own is
+ * a claim the user cannot check — and the strength is on one scale for both
+ * kinds, so a hard edge and a similarity can be compared rather than merely
+ * listed side by side.
+ */
+function renderLink(link: TermLink): HTMLLIElement {
+  const row = document.createElement('li');
+  row.className = `link-row link-${link.kind}`;
+
+  const pair = document.createElement('p');
+  pair.className = 'link-pair';
+  pair.textContent = `「${link.from.text}」 — 「${link.to.text}」`;
+
+  const why = document.createElement('p');
+  why.className = 'link-why';
+
+  const reason = document.createElement('span');
+  reason.className = 'link-reason';
+  reason.textContent = link.reason;
+
+  const strength = document.createElement('span');
+  strength.className = 'link-strength';
+  strength.textContent = `强度 ${link.strength.toFixed(2)}`;
+
+  why.append(reason, strength);
+  row.append(pair, why);
+  return row;
+}
+
+/**
  * Render one drop and the items it caught.
  *
  * An unread drop says so rather than showing an empty list, because "nothing
@@ -142,6 +249,10 @@ function renderItem(item: Item): HTMLLIElement {
  * The drop's **reply** is shown with it rather than only in the line above the
  * form: it belongs to that drop, so a reload shows what was said the first time
  * instead of an empty screen where the answer used to be.
+ *
+ * The **terms** it yielded are shown the same way and for the same reason: they
+ * are what this fragment contributed, and a term said here appears here even if
+ * it is one the product already knew.
  */
 function renderDrop(drop: DropSummary): HTMLLIElement {
   const item = document.createElement('li');
@@ -169,6 +280,12 @@ function renderDrop(drop: DropSummary): HTMLLIElement {
       caught.append(...drop.items.map(renderItem));
       item.append(caught);
     }
+    if (drop.terms.length > 0) {
+      const said = document.createElement('ul');
+      said.className = 'term-list';
+      said.append(...drop.terms.map(renderTerm));
+      item.append(said);
+    }
   } else {
     const pending = document.createElement('p');
     pending.className = 'item-pending';
@@ -191,6 +308,39 @@ async function loadDrops(): Promise<readonly DropSummary[]> {
   const payload = (await response.json()) as { drops: DropSummary[] };
   render(payload.drops);
   return payload.drops;
+}
+
+/**
+ * Load the links between terms.
+ *
+ * Its own read rather than part of a drop: links are not a drop's property —
+ * they are the accumulation itself, and one of them can join a term said today
+ * to one said weeks ago. A failure here leaves the list as it was rather than
+ * claiming nothing is connected, because "we could not read it" and "there is
+ * nothing" are different facts.
+ *
+ * @returns the links as last read, or null when the server could not answer.
+ */
+async function loadLinks(): Promise<readonly TermLink[] | null> {
+  const response = await fetch('/api/links');
+  if (!response.ok) return null;
+  const payload = (await response.json()) as { links: TermLink[] };
+  linkList.replaceChildren(...payload.links.map(renderLink));
+  linkEmpty.hidden = payload.links.length > 0;
+  return payload.links;
+}
+
+/**
+ * Give the semantic half of linking its moment, then leave the list alone.
+ *
+ * See `LINK_GRACE_POLLS`: the wait is bounded on purpose. Giving up is not a
+ * failure — the links that are there are real, and the next load looks again.
+ */
+async function settleLinks(): Promise<void> {
+  for (let attempt = 0; attempt < LINK_GRACE_POLLS; attempt += 1) {
+    await loadLinks();
+    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+  }
 }
 
 /** Ask about one drop, or null when the server cannot answer. */
@@ -349,6 +499,11 @@ form.addEventListener('submit', (event) => {
       await loadDrops();
       const settled = await settleDrop(payload.id, payload.reply);
       if (settled !== null) reply.textContent = settled.reply;
+
+      // Terms arrive with the reading, and what they connect to is decided
+      // after it, so the links are read last — and given a moment, because the
+      // semantic half is still in flight when the reading lands.
+      await settleLinks();
     } catch {
       reply.textContent = '连不上本地服务。';
     } finally {
@@ -402,3 +557,4 @@ for (const tab of document.querySelectorAll<HTMLButtonElement>('.act-tab')) {
 }
 
 void loadDrops();
+void loadLinks();

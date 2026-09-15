@@ -217,6 +217,76 @@ body {
   color: var(--ink-soft);
 }
 
+/* The terms this drop yielded (04). Chips rather than a list, because they are
+   fragments of the user's own sentence, not rows of anything. Indented like the
+   items so they read as belonging to the drop above them. */
+.term-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0.6rem 0 0;
+  padding: 0 0 0 0.9rem;
+  list-style: none;
+}
+
+.term-chip {
+  padding: 0.1rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+}
+
+/* The links between terms (04). Their own section below the drops, because a
+   link is not a drop's property — it is what the drops added up to. */
+.linked {
+  margin-top: 2.5rem;
+}
+
+.link-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.link-row {
+  padding: 0.6rem 0.9rem;
+  border-left: 3px solid var(--line);
+  background: #fff;
+}
+
+.link-row + .link-row {
+  margin-top: 0.4rem;
+}
+
+/* A hard edge was certain — the two were said in one breath — so it is marked
+   with the accent. A similarity is a reading of the words, and is left plain:
+   the two are not the same kind of evidence and should not look it. */
+.link-same-drop {
+  border-left-color: var(--accent);
+}
+
+.link-pair {
+  margin: 0;
+  word-break: break-word;
+}
+
+.link-why {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin: 0.2rem 0 0;
+  font-size: 0.8rem;
+  color: var(--ink-soft);
+}
+
+.link-strength {
+  flex: none;
+  white-space: nowrap;
+}
+
 .empty,
 .not-yet {
   color: var(--ink-soft);

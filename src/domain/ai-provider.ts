@@ -8,8 +8,13 @@
  * Ticket 03 gives `respond` the **situation** it is answering and the
  * parent-voice rules, and has the domain check what comes back rather than
  * trusting it. Ticket 07 adds the two ends of **recall** — parsing a question,
- * and composing its answer. Embeddings and link judging arrive with their own
- * tickets.
+ * and composing its answer. Ticket 04 adds the two ends of **linking**: encoding
+ * text, and judging the pairs a score could not settle.
+ *
+ * Note what linking does *not* put here: deciding whether two terms are linked.
+ * The cosine and the thresholds are ordinary code inside the domain, so which
+ * links exist is reproducible and a provider can never invent one — the model is
+ * consulted only about the grey zone, and only when the policy says to ask.
  *
  * Note what recall does *not* put here: choosing which records answer a
  * question. That selection is ordinary code inside the domain, so "found
@@ -109,6 +114,16 @@ export interface ExtractResult {
   /** The items found in the drop. Empty is normal — most drops contain none. */
   readonly items: readonly ExtractedItem[];
   /**
+   * The terms worth bringing up again, in the user's own words and in the order
+   * they were said. Empty is normal.
+   *
+   * The wording is the contract: "想学吉他" is what the user said, and handing
+   * back "音乐兴趣" instead would replace their evidence with the model's
+   * summary of it. No ids and no links — identity and connection are the
+   * domain's to mint, exactly as they are for items.
+   */
+  readonly terms: readonly string[];
+  /**
    * What kind of input this was, as the provider judged it.
    *
    * Recorded internally and never shown. It exists so the product can decide
@@ -116,6 +131,50 @@ export interface ExtractResult {
    * part of the product may ask the user to pick one.
    */
   readonly inputType: InputType;
+}
+
+/**
+ * Texts the provider is asked to encode.
+ *
+ * A batch rather than one text at a time, because encoding is the same call
+ * whatever it is handed and a drop arrives with several terms at once.
+ */
+export interface EmbedRequest {
+  /** The texts to encode, in the order the domain wants the vectors back. */
+  readonly texts: readonly string[];
+}
+
+/** One vector per text, in the order the texts were given. */
+export interface EmbedResult {
+  readonly vectors: readonly (readonly number[])[];
+}
+
+/** Two terms the provider is asked to rule on, and how close they already look. */
+export interface JudgeLinkRequest {
+  /** The wording at one end. */
+  readonly from: string;
+  /** The wording at the other end. */
+  readonly to: string;
+  /**
+   * The cosine similarity the domain already computed.
+   *
+   * Sent because it is the whole reason this call is happening: the score sits
+   * in a band where it is neither clearly a link nor clearly not one, and a
+   * judge asked without the score would be judging blind.
+   */
+  readonly similarity: number;
+}
+
+/** The provider's verdict on one pair. */
+export interface JudgeLinkResult {
+  /**
+   * Whether the two are close enough to link.
+   *
+   * A boolean rather than a score on purpose: this call exists to settle a band
+   * the domain has already measured, and a second number with a different scale
+   * would only invite the two to be compared.
+   */
+  readonly related: boolean;
 }
 
 /** A question the user asked of their records. */
@@ -206,6 +265,34 @@ export interface AiProvider {
    * @returns the items it contains, and what kind of input it was.
    */
   extract(request: ExtractRequest): Promise<ExtractResult>;
+
+  /**
+   * Encode texts so the domain can measure how close two terms are.
+   *
+   * The domain does the comparing: this call returns vectors and nothing else,
+   * because turning a score into a decision has to be ordinary code the tests
+   * can pin down. A provider that throws, hangs, or returns a vector per input
+   * that does not line up costs the terms their semantic links — never the
+   * terms themselves, which were already stored by the time this is called.
+   *
+   * @param request - the texts to encode.
+   * @returns one vector per text, in the order asked.
+   */
+  embed(request: EmbedRequest): Promise<EmbedResult>;
+
+  /**
+   * Settle a pair whose similarity landed in the grey zone.
+   *
+   * Only ever called for a pair the domain could not decide by score: high
+   * scores connect and low scores do not, and asking a model about those would
+   * spend a call to be told what the number already said. Whether the grey zone
+   * is asked at all is a policy the domain holds, not a decision this call
+   * makes.
+   *
+   * @param request - both wordings, and the score between them.
+   * @returns whether the two should be linked.
+   */
+  judgeLink(request: JudgeLinkRequest): Promise<JudgeLinkResult>;
 
   /**
    * Work out what to look for when the user asks about their records.

@@ -26,7 +26,14 @@ import { join } from 'node:path';
 
 import { createDomain } from './core.ts';
 import type { RespondRequest } from './ai-provider.ts';
-import { REPLY_THAT_BREAKS_THE_RULES, createFakeProvider } from './fake-provider.ts';
+import {
+  REPLY_THAT_BREAKS_THE_RULES,
+  createFakeProvider,
+  type EmbedScript,
+  type ExtractScript,
+  type FakeProviderScript,
+} from './fake-provider.ts';
+import type { Domain, Term, TermLink } from './interface.ts';
 import { openSqliteStore } from './sqlite-store.ts';
 
 let failures = 0;
@@ -356,11 +363,11 @@ await check('the input type is recorded internally and never asked of the user',
       assert.equal(drop?.extracted, true, 'the type was recorded behind the interface');
 
       // And the interface hands the user no way to see or choose it: the whole
-      // drop summary carries the text, the time, the items, the line it answers
-      // with, and nothing else.
+      // drop summary carries the text, the time, the items, the terms, the line
+      // it answers with, and nothing else.
       assert.deepEqual(
         Object.keys(drop ?? {}).sort(),
-        ['body', 'droppedAt', 'extracted', 'id', 'items', 'reply'],
+        ['body', 'droppedAt', 'extracted', 'id', 'items', 'reply', 'terms'],
         'no classification field is exposed to the page',
       );
     } finally {
@@ -551,6 +558,677 @@ await check('with no provider at all, a drop still catches its record', async ()
       assert.equal(read?.extracted, false, 'nothing has read it');
       assert.deepEqual(read?.items, [], 'and it has caught no items');
       assert.equal((await domain.extract(dropped.id))?.extracted, false, 'asking again cannot invent a provider');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+console.log('\ndomain core — what a drop connects');
+
+/** A fragment, and the terms it is scripted to yield — in the user's own words. */
+type Reading = readonly [body: string, terms: readonly string[]];
+
+/**
+ * A provider scripted to read those fragments into those terms, and nothing
+ * else. Nothing is scripted for embedding or judging unless the check adds it,
+ * which is how a check can tell "code did this" from "a model did this".
+ */
+function termsOnly(
+  readings: readonly Reading[],
+  extra: Omit<FakeProviderScript, 'extractByBody'> = {},
+): ReturnType<typeof createFakeProvider> {
+  const extractByBody: Record<string, ExtractScript> = {};
+  for (const [body, terms] of readings) {
+    extractByBody[body] = { kind: 'read', reading: { inputType: 'idea', items: [], terms } };
+  }
+  return createFakeProvider({ ...extra, extractByBody });
+}
+
+/** Script the fake to hand back one vector per term text. */
+function vectors(readings: Readonly<Record<string, readonly number[]>>): Record<string, EmbedScript> {
+  const scripted: Record<string, EmbedScript> = {};
+  for (const [text, vector] of Object.entries(readings)) {
+    scripted[text] = { kind: 'vectors', vectors: [vector] };
+  }
+  return scripted;
+}
+
+/** Wait until a fragment's terms have been read out of it, and hand them back. */
+async function readTerms(domain: Domain, dropId: string): Promise<readonly Term[]> {
+  await settledUntil(async () => ((await domain.getDrop(dropId))?.terms.length ?? 0) > 0);
+  return (await domain.getDrop(dropId))?.terms ?? [];
+}
+
+/** Wait until at least `count` links exist, then hand back every link. */
+async function readLinks(domain: Domain, count: number): Promise<readonly TermLink[]> {
+  await settledUntil(async () => (await domain.listLinks()).length >= count);
+  return domain.listLinks();
+}
+
+/** The link between two terms, whichever way round the pair was stored. */
+function linkBetween(links: readonly TermLink[], a: string, b: string): TermLink | undefined {
+  return links.find(
+    (link) =>
+      (link.from.text === a && link.to.text === b) || (link.from.text === b && link.to.text === a),
+  );
+}
+
+/** Two fragments, and the terms each is scripted to yield. */
+const GUITAR_DROP = '最近老想着要不要报个吉他班，还想去爬山';
+const GUITAR_TERMS = ['报个吉他班', '想去爬山'];
+const HILL_DROP = '又想起学琴这事了，周末想去爬山';
+/** Later fragments, whose terms each check scripts for itself. */
+const THIRD_DROP = '周末想去爬山，顺便看看装备';
+const SWAP_DROP = '想学门乐器，先看看钢琴';
+
+await check("a drop's terms keep the user's own words, not a tidied-up concept", async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const domain = createDomain({ store, provider: termsOnly([[GUITAR_DROP, GUITAR_TERMS]]) });
+      const dropped = await domain.drop(GUITAR_DROP);
+      const terms = await readTerms(domain, dropped.id);
+
+      assert.deepEqual(
+        terms.map((term) => term.text),
+        GUITAR_TERMS,
+        'the wording is the user\'s, not a higher-level concept',
+      );
+      assert.ok(
+        terms.every((term) => term.dropId === dropped.id),
+        'and each one points back at the drop it came from',
+      );
+      assert.ok(
+        terms.every((term) => Number.isFinite(Date.parse(term.firstSeenAt))),
+        'each carries when it was first said',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a term reaches the page without the vector it is compared by', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const domain = createDomain({ store, provider: termsOnly([[GUITAR_DROP, GUITAR_TERMS]]) });
+      const dropped = await domain.drop(GUITAR_DROP);
+      const [term] = await readTerms(domain, dropped.id);
+
+      // The embedding is how the domain reasons, not something the page is owed.
+      // Leaking it would make the numbers look like part of the product.
+      assert.deepEqual(
+        Object.keys(term ?? {}).sort(),
+        ['dropId', 'firstSeenAt', 'id', 'text'],
+        'the vector stays inside the domain',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('the same words said again are the same term, not a second one', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const first = '想去学吉他';
+      const second = '还是想去学吉他，就是没时间';
+      const domain = createDomain({
+        store,
+        provider: termsOnly([
+          [first, ['想去学吉他']],
+          [second, ['想去学吉他']],
+        ]),
+      });
+
+      const one = await readTerms(domain, (await domain.drop(first)).id);
+      const two = await readTerms(domain, (await domain.drop(second)).id);
+
+      assert.equal(
+        two[0]?.id,
+        one[0]?.id,
+        'a term is a thing that can be brought up again, so repeating it cannot make a second one',
+      );
+      assert.equal(two[0]?.dropId, (await domain.listDrops())[0]?.id, 'and it keeps where it first came from');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a drop that said no terms yields none, and is still a drop that was read', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const plain = '今天天气不错';
+      const domain = createDomain({ store, provider: termsOnly([[plain, []]]) });
+      const dropped = await domain.drop(plain);
+
+      const read = await domain.getDrop(dropped.id);
+      assert.equal(read?.extracted, true, 'it was read');
+      assert.deepEqual(read?.terms, [], 'and genuinely had nothing worth bringing up again');
+      assert.deepEqual(await domain.listLinks(), [], 'so nothing was connected');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('terms said together in one drop are linked by code, with no model call at all', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      // Embedding and judging are both scripted to hang, so a link that still
+      // appears cannot have come from either of them. The whole path is code.
+      const provider = termsOnly([[GUITAR_DROP, [...GUITAR_TERMS, '爬山计划']]], {
+        embedFallback: { kind: 'hang' },
+        judgeLinkFallback: { kind: 'hang' },
+      });
+      const domain = createDomain({ store, provider });
+      const dropped = await domain.drop(GUITAR_DROP);
+
+      const terms = await readTerms(domain, dropped.id);
+      const links = await readLinks(domain, 3);
+
+      assert.equal(links.length, 3, 'every pair of terms from one drop is linked');
+      assert.ok(
+        links.every((link) => link.kind === 'same-drop'),
+        'all three are the zero-model kind',
+      );
+      assert.ok(
+        links.every((link) => link.strength === 1),
+        'saying two things in one breath is the strongest evidence there is',
+      );
+      assert.ok(
+        links.every((link) => link.reason.trim().length > 0),
+        'and each one says why it exists',
+      );
+      assert.equal(terms.length, 3);
+      assert.deepEqual(provider.embedded, [], 'nothing was embedded: there was no other term to compare with');
+      assert.deepEqual(provider.judged, [], 'and no verdict was ever asked for');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('the same pair is never linked twice, however often it is said', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const again = '报个吉他班和去爬山都还想，学琴也还想';
+      const domain = createDomain({
+        store,
+        provider: termsOnly([
+          [GUITAR_DROP, GUITAR_TERMS],
+          [again, GUITAR_TERMS],
+        ]),
+      });
+
+      await readTerms(domain, (await domain.drop(GUITAR_DROP)).id);
+      const links = await readLinks(domain, 1);
+      await domain.drop(again);
+      await settledUntil(async () => false);
+
+      assert.equal(
+        (await domain.listLinks()).length,
+        links.length,
+        'saying the same two things again does not grow a second link between them',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('terms close enough are linked by their vectors, with nobody asked', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = termsOnly(
+        [
+          [GUITAR_DROP, ['想学吉他']],
+          [HILL_DROP, ['打算学吉他']],
+        ],
+        { embedByText: vectors({ 想学吉他: [1, 0], 打算学吉他: [1, 0] }) },
+      );
+      const domain = createDomain({ store, provider });
+
+      await readTerms(domain, (await domain.drop(GUITAR_DROP)).id);
+      await readTerms(domain, (await domain.drop(HILL_DROP)).id);
+      const links = await readLinks(domain, 1);
+
+      const link = linkBetween(links, '想学吉他', '打算学吉他');
+      assert.ok(link !== undefined, 'the two ends of the link name the terms');
+      assert.equal(link.kind, 'similar', 'this is the semantic kind');
+      assert.equal(link.strength, 1, 'its strength is the score it got');
+      assert.match(link.reason, /语义相近/, 'and the reason says so');
+      assert.deepEqual(provider.judged, [], 'a clear score is never put to a judge');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('terms that are far apart are left alone, without asking anyone', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = termsOnly(
+        [
+          [GUITAR_DROP, ['想学吉他']],
+          [HILL_DROP, ['打算学吉他']],
+        ],
+        { embedByText: vectors({ 想学吉他: [1, 0], 打算学吉他: [0, 1] }) },
+      );
+      const domain = createDomain({ store, provider });
+
+      await readTerms(domain, (await domain.drop(GUITAR_DROP)).id);
+      await readTerms(domain, (await domain.drop(HILL_DROP)).id);
+      await settledUntil(async () => false);
+
+      assert.deepEqual(await domain.listLinks(), [], 'two unrelated fragments stay unconnected');
+      assert.deepEqual(provider.judged, [], 'and the low band never reaches a judge');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a pair in the grey zone is judged, and connects when the judge says it is close', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      // Scripted by pair, in the pair's own single order — here the reverse of
+      // the one the domain hands over, because which end is `from` carries no
+      // meaning and a check should not have to know it.
+      const provider = termsOnly(
+        [
+          [GUITAR_DROP, ['想学吉他']],
+          [HILL_DROP, ['想学门乐器']],
+        ],
+        {
+          embedByText: vectors({ 想学吉他: [1, 0], 想学门乐器: [0.8, 0.6] }),
+          judgeLinkByPair: {
+            '想学吉他\u0000想学门乐器': { kind: 'verdict', related: true },
+          },
+        },
+      );
+      const domain = createDomain({ store, provider });
+
+      await readTerms(domain, (await domain.drop(GUITAR_DROP)).id);
+      await readTerms(domain, (await domain.drop(HILL_DROP)).id);
+      const links = await readLinks(domain, 1);
+
+      const link = linkBetween(links, '想学吉他', '想学门乐器');
+      assert.ok(link !== undefined, 'the judged pair is linked');
+      assert.match(link.reason, /灰区/, 'and the reason says it was judged, not merely scored');
+      assert.ok(
+        link.strength !== undefined && link.strength > 0.7 && link.strength < 0.85,
+        'its strength is the score it actually got',
+      );
+
+      const [pair] = provider.judged;
+      assert.equal(provider.judged.length, 1, 'exactly one pair was put to the judge');
+      assert.deepEqual(
+        [pair?.from, pair?.to].sort(),
+        ['想学吉他', '想学门乐器'].sort(),
+        'and it was the grey pair, by both names',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a grey pair the judge turns down is not linked', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = termsOnly(
+        [
+          [GUITAR_DROP, ['想学吉他']],
+          [HILL_DROP, ['想学门乐器']],
+        ],
+        {
+          embedByText: vectors({ 想学吉他: [1, 0], 想学门乐器: [0.8, 0.6] }),
+          judgeLinkFallback: { kind: 'verdict', related: false },
+        },
+      );
+      const domain = createDomain({ store, provider });
+
+      await readTerms(domain, (await domain.drop(GUITAR_DROP)).id);
+      await readTerms(domain, (await domain.drop(HILL_DROP)).id);
+      await settledUntil(async () => provider.judged.length > 0);
+
+      assert.deepEqual(await domain.listLinks(), [], 'the judge was asked and said no');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('the grey-zone policy can be set to leave the pair unlinked without asking', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      // The policy is a value the core is handed, not a branch buried in it:
+      // changing the rule later must not mean editing the linking path.
+      const provider = termsOnly(
+        [
+          [GUITAR_DROP, ['想学吉他']],
+          [HILL_DROP, ['想学门乐器']],
+        ],
+        {
+          embedByText: vectors({ 想学吉他: [1, 0], 想学门乐器: [0.8, 0.6] }),
+          judgeLinkFallback: { kind: 'verdict', related: true },
+        },
+      );
+      const domain = createDomain({
+        store,
+        provider,
+        linkPolicy: { connectAbove: 0.85, skipBelow: 0.7, greyZone: 'skip' },
+      });
+
+      await readTerms(domain, (await domain.drop(GUITAR_DROP)).id);
+      await readTerms(domain, (await domain.drop(HILL_DROP)).id);
+      await settledUntil(async () => false);
+
+      assert.deepEqual(await domain.listLinks(), [], 'the grey pair is left unlinked for now');
+      assert.deepEqual(provider.judged, [], 'and nobody was asked about it');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('the bands come from the thresholds the core was given, not from fixed numbers', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = termsOnly(
+        [
+          [GUITAR_DROP, ['想学吉他']],
+          [HILL_DROP, ['想学门乐器']],
+        ],
+        {
+          embedByText: vectors({ 想学吉他: [1, 0], 想学门乐器: [0.8, 0.6] }),
+          judgeLinkFallback: { kind: 'verdict', related: false },
+        },
+      );
+      const domain = createDomain({
+        store,
+        provider,
+        linkPolicy: { connectAbove: 0.75, skipBelow: 0.5, greyZone: 'judge' },
+      });
+
+      await readTerms(domain, (await domain.drop(GUITAR_DROP)).id);
+      await readTerms(domain, (await domain.drop(HILL_DROP)).id);
+      const links = await readLinks(domain, 1);
+
+      assert.ok(
+        linkBetween(links, '想学吉他', '想学门乐器') !== undefined,
+        'the same 0.8 pair now connects on its score alone',
+      );
+      assert.deepEqual(provider.judged, [], 'so the judge is not consulted at all');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('strengths are comparable across both kinds of link', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const third = '再想想学琴的事';
+      const provider = termsOnly(
+        [
+          [GUITAR_DROP, ['报个吉他班', '想去爬山']],
+          [third, ['想学吉他']],
+        ],
+        { embedByText: vectors({ 报个吉他班: [1, 0], 想去爬山: [0, 1], 想学吉他: [0.9, 0.4358898943540674] }) },
+      );
+      const domain = createDomain({ store, provider });
+
+      await readTerms(domain, (await domain.drop(GUITAR_DROP)).id);
+      await readTerms(domain, (await domain.drop(third)).id);
+      const links = await readLinks(domain, 3);
+
+      const hard = links.find((link) => link.kind === 'same-drop');
+      const soft = links.find((link) => link.kind === 'similar');
+      assert.ok(hard !== undefined && soft !== undefined, 'both kinds are present');
+      assert.ok(
+        hard.strength > soft.strength,
+        'and a hard edge outranks a merely similar one on the same scale',
+      );
+      assert.notEqual(hard.reason, soft.reason, 'the two reasons say different things');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a provider that cannot embed costs the semantic link and nothing else', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = termsOnly(
+        [
+          [GUITAR_DROP, ['报个吉他班', '想去爬山']],
+          [HILL_DROP, ['想去爬山']],
+        ],
+        { embedFallback: { kind: 'fail', reason: 'no embedding endpoint' } },
+      );
+      const domain = createDomain({ store, provider });
+
+      await readTerms(domain, (await domain.drop(GUITAR_DROP)).id);
+      await readTerms(domain, (await domain.drop(HILL_DROP)).id);
+      const links = await readLinks(domain, 1);
+
+      assert.deepEqual(
+        links.map((link) => link.kind),
+        ['same-drop'],
+        'the hard edge survives a provider that cannot embed',
+      );
+      assert.equal(
+        (await domain.listDrops()).length,
+        2,
+        'and both drops are still there, with their terms',
+      );
+      assert.equal((await domain.listDrops())[1]?.terms.length, 1);
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a provider that blows up in the grey zone does not turn the pair into a link', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = termsOnly(
+        [
+          [GUITAR_DROP, ['想学吉他']],
+          [HILL_DROP, ['想学门乐器']],
+        ],
+        {
+          embedByText: vectors({ 想学吉他: [1, 0], 想学门乐器: [0.8, 0.6] }),
+          judgeLinkFallback: { kind: 'throw', reason: 'judge blew up' },
+        },
+      );
+      const domain = createDomain({ store, provider });
+
+      await readTerms(domain, (await domain.drop(GUITAR_DROP)).id);
+      await readTerms(domain, (await domain.drop(HILL_DROP)).id);
+      await settledUntil(async () => false);
+
+      assert.deepEqual(
+        await domain.listLinks(),
+        [],
+        'an unanswered question is not an answer, so no link is invented',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('terms and their links survive reopening the database', async () => {
+  await withDatabase(async (file) => {
+    const provider = termsOnly(
+      [
+        [GUITAR_DROP, ['想学吉他']],
+        [HILL_DROP, ['打算学吉他']],
+      ],
+      { embedByText: vectors({ 想学吉他: [1, 0], 打算学吉他: [1, 0] }) },
+    );
+
+    const first = openSqliteStore(file);
+    const domain = createDomain({ store: first, provider });
+    await readTerms(domain, (await domain.drop(GUITAR_DROP)).id);
+    await readTerms(domain, (await domain.drop(HILL_DROP)).id);
+    await readLinks(domain, 1);
+    await first.close();
+
+    const second = openSqliteStore(file);
+    try {
+      const links = await createDomain({ store: second }).listLinks();
+      assert.equal(links.length, 1, 'the link is on disk, not in memory');
+      const [drop] = await createDomain({ store: second }).listDrops();
+      assert.deepEqual(drop?.terms.map((term) => term.text), ['想学吉他']);
+    } finally {
+      await second.close();
+    }
+  });
+});
+
+await check('two things said together outrank an earlier reading of the same pair', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      // The same two terms, met twice: first as words that looked close, then —
+      // in a later fragment — actually said together. There is one link between
+      // them either way, and it has to end up being the fact rather than the
+      // reading, because that is the stronger evidence and ticket 05 word its
+      // conclusions from the strength.
+      const both = '想学吉他和打算学吉他都还想，先看看琴';
+      const provider = termsOnly(
+        [
+          [GUITAR_DROP, ['想学吉他']],
+          [HILL_DROP, ['打算学吉他']],
+          [both, ['想学吉他', '打算学吉他']],
+        ],
+        {
+          embedByText: vectors({
+            想学吉他: [1, 0],
+            打算学吉他: [0.9, 0.4358898943540674],
+          }),
+        },
+      );
+      const domain = createDomain({ store, provider });
+
+      await readTerms(domain, (await domain.drop(GUITAR_DROP)).id);
+      await readTerms(domain, (await domain.drop(HILL_DROP)).id);
+      const read = await readLinks(domain, 1);
+      assert.equal(linkBetween(read, '想学吉他', '打算学吉他')?.kind, 'similar', 'the reading came first');
+
+      await readTerms(domain, (await domain.drop(both)).id);
+      await settledUntil(async () => false);
+
+      const links = await domain.listLinks();
+      const link = linkBetween(links, '想学吉他', '打算学吉他');
+      assert.equal(links.length, 1, 'saying them together did not add a second link');
+      assert.equal(link?.kind, 'same-drop', 'it took the pair over from the similarity');
+      assert.equal(link?.strength, 1, 'with the strength of something that certainly happened');
+      assert.match(link?.reason ?? '', /同一次投递/, 'and a reason that says so');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('terms whose vectors were both missing are compared once they arrive', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      // A provider that is down cannot embed anything, and a term with no vector
+      // is a pair that cannot be decided. Both of these were left behind by that
+      // outage, from different drops; the round that finally encodes them has to
+      // compare them with each other, not only with the term that happens to be
+      // being dropped today — otherwise the pair waits for a repeat that may
+      // never come.
+      const down = termsOnly(
+        [
+          [GUITAR_DROP, ['想学吉他']],
+          [HILL_DROP, ['打算学吉他']],
+        ],
+        { embedFallback: { kind: 'fail', reason: 'embedding endpoint is down' } },
+      );
+      const backUp = termsOnly([[THIRD_DROP, ['想去爬山']]], {
+        embedByText: vectors({ 想学吉他: [1, 0], 打算学吉他: [1, 0], 想去爬山: [0, 1] }),
+      });
+
+      const before = createDomain({ store, provider: down });
+      await readTerms(before, (await before.drop(GUITAR_DROP)).id);
+      await readTerms(before, (await before.drop(HILL_DROP)).id);
+      await settledUntil(async () => false);
+      assert.deepEqual(await before.listLinks(), [], 'the outage left both terms uncompared');
+
+      const after = createDomain({ store, provider: backUp });
+      await readTerms(after, (await after.drop(THIRD_DROP)).id);
+      const links = await readLinks(after, 1);
+
+      const link = linkBetween(links, '想学吉他', '打算学吉他');
+      assert.ok(link !== undefined, 'the two stranded terms were compared with each other');
+      assert.equal(link.kind, 'similar');
+      assert.equal(
+        linkBetween(links, '想去爬山', '想学吉他'),
+        undefined,
+        'and the term that arrived today connected to neither of them',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('vectors from a different embedding model are never compared', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      // The spec lets the embedding implementation be swapped, and a stored
+      // vector then belongs to a model the new one knows nothing about. The two
+      // are the same length here on purpose — the point is that a long vector
+      // and a short one must not be compared on the part they happen to share,
+      // which would read as a perfect match and become a link.
+      const wide = termsOnly(
+        [
+          [GUITAR_DROP, ['想学吉他']],
+          [HILL_DROP, ['想去爬山']],
+        ],
+        { embedByText: vectors({ 想学吉他: [1, 0], 想去爬山: [0, 1] }) },
+      );
+      const swapped = termsOnly([[SWAP_DROP, ['想学门乐器']]], {
+        embedByText: vectors({ 想学门乐器: [1, 0, 0] }),
+      });
+
+      const before = createDomain({ store, provider: wide });
+      await readTerms(before, (await before.drop(GUITAR_DROP)).id);
+      await readTerms(before, (await before.drop(HILL_DROP)).id);
+
+      const after = createDomain({ store, provider: swapped });
+      await readTerms(after, (await after.drop(SWAP_DROP)).id);
+      await settledUntil(async () => false);
+
+      assert.deepEqual(
+        await after.listLinks(),
+        [],
+        'a vector from another model is not a measurement of anything',
+      );
     } finally {
       await store.close();
     }

@@ -205,6 +205,20 @@ export function createHandler(domain: Domain) {
       return;
     }
 
+    // Every link grown between the user's terms. Its own endpoint rather than
+    // part of a drop, because a link belongs to no single drop: it is what the
+    // drops added up to. Each one carries its reason and strength, so the page
+    // can show why two things are joined rather than only that they are.
+    if (request.method === 'GET' && url === '/api/links') {
+      try {
+        const links = await domain.listLinks();
+        sendJson(response, 200, { links });
+      } catch {
+        sendJson(response, 500, { error: '读取失败' });
+      }
+      return;
+    }
+
     if (request.method === 'GET') {
       const requested = resolveStaticFile(url);
       const file = requested ?? join(WEB_DIST, 'index.html');

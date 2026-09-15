@@ -18,6 +18,7 @@ git 里（`archive/` 不进 git），并且每个都在这张表里占一行。
 |---|---|---|
 | [`e2e-ticket-02.mjs`](e2e-ticket-02.mjs) | 真 HTTP：投递 → 事项/留档、待安排、输入类型不外泄、重启后仍在 | `node tools/e2e-ticket-02.mjs` |
 | [`e2e-ticket-03.mjs`](e2e-ticket-03.mjs) | 真 HTTP：落库那条回应 → 被校验过的替换、违规那句在任何响应里都取不到、停止追问、重启后同样 | `node tools/e2e-ticket-03.mjs` |
+| [`e2e-ticket-04.mjs`](e2e-ticket-04.mjs) | 真 HTTP：投递 → 词条（保留原话）、同次投递的硬边、跨投递的相似边带理由与强度、向量不外泄、重启后仍在 | `node tools/e2e-ticket-04.mjs` |
 
 ## 约定
 

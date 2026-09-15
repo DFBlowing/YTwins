@@ -47,6 +47,86 @@ export interface Item {
   readonly dropId: string;
 }
 
+/**
+ * One thing the user said that can be brought up again, in their own words.
+ *
+ * "Wants to learn guitar" is a term; "music interest" is not — turning the first
+ * into the second throws away the only evidence the product works from. Saying
+ * the same words on another day is the **same** term, which is what lets a
+ * subject accumulate instead of scattering into one-off strings.
+ */
+export interface Term {
+  /** Stable identity of this term. */
+  readonly id: string;
+  /** The user's own wording — the string that arrived, trimmed and nothing else. */
+  readonly text: string;
+  /**
+   * The drop this term first came from.
+   *
+   * The *first* one, not the last: a term said again is the same term, so this
+   * is where it came from rather than where it was last heard.
+   */
+  readonly dropId: string;
+  /** When it was first said, as an ISO-8601 string. */
+  readonly firstSeenAt: string;
+}
+
+/**
+ * How two terms came to be connected.
+ *
+ * Two kinds, on purpose. `same-drop` is a fact about the user's own sentence —
+ * two things said in one breath — and costs no model call at all. `similar` is
+ * a reading of what the words mean, so it is a **judgment** and is weaker
+ * evidence by construction.
+ */
+export type LinkKind = 'same-drop' | 'similar';
+
+/**
+ * Every kind of link, in the order the product offers them.
+ *
+ * A runtime list beside the type for the same reason `INPUT_TYPES` exists: the
+ * storage adapter has to read a kind back out of a file, and a value it does not
+ * recognise must not become a kind the domain never wrote.
+ */
+export const LINK_KINDS: readonly LinkKind[] = ['same-drop', 'similar'];
+
+/** One end of a link: enough to name the term, no more. */
+export interface LinkedTerm {
+  /** Identity of the term at this end. */
+  readonly id: string;
+  /** The user's own wording for it. */
+  readonly text: string;
+}
+
+/**
+ * Two terms that have been connected in the user's own material.
+ *
+ * Both ends carry their wording, so a link can be read on its own — "what got
+ * connected?" is the question this answers, and an id pair would answer it only
+ * for someone holding the other table.
+ */
+export interface TermLink {
+  /** Stable identity of this link. */
+  readonly id: string;
+  /** Which kind of evidence produced it. */
+  readonly kind: LinkKind;
+  /**
+   * How strong the connection is, on one scale shared by both kinds.
+   *
+   * Comparable, not calibrated: a hard edge is 1 because two things said in one
+   * breath are certain to have been said together, and a semantic edge carries
+   * the score it earned. See the caution in `linking.ts` — a cosine is not a
+   * probability, so this orders evidence rather than measuring belief.
+   */
+  readonly strength: number;
+  /** Why this link exists, in words a person can read. */
+  readonly reason: string;
+  /** One end. The relation is symmetric; which end is which is not meaningful. */
+  readonly from: LinkedTerm;
+  /** The other end. */
+  readonly to: LinkedTerm;
+}
+
 /** What a drop caught, plus the line the user gets back. */
 export interface DropResult {
   /**
@@ -95,6 +175,15 @@ export interface DropSummary {
    * already succeeded.
    */
   readonly items: readonly Item[];
+  /**
+   * The terms this drop yielded, in the order they were said. Empty until
+   * extraction has run, and empty forever if it failed — both are ordinary,
+   * because the drop itself already succeeded.
+   *
+   * A term already known from an earlier drop appears here too: what this drop
+   * said is a fact about this drop, whatever else it is a fact about.
+   */
+  readonly terms: readonly Term[];
   /**
    * Whether extraction has run for this drop, successfully or not.
    *
@@ -208,11 +297,13 @@ export interface RecallOptions {
  *
  * Ticket 01 opened exactly one operation: **dropping**. Ticket 02 opened what
  * dropping turns out to mean — a drop is split into **items** and a **record**.
- * Ticket 07 opens **recall**: asking a question of those records and being told
- * both the answer and which drop it came from. The remaining operations named
- * in the spec's interface (surfacing, portrait, chain, scheduling, deletion)
- * arrive with their own tickets — this interface grows, it does not get
- * pre-declared with stubs that would fake behaviour.
+ * Ticket 04 opened what the record accumulates into: a drop yields **terms**,
+ * and terms grow **links** between them. Ticket 07 opens **recall**: asking a
+ * question of those records and being told both the answer and which drop it
+ * came from. The remaining operations named in the spec's interface (surfacing,
+ * portrait, chain, scheduling, deletion) arrive with their own tickets — this
+ * interface grows, it does not get pre-declared with stubs that would fake
+ * behaviour.
  */
 export interface Domain {
   /**
@@ -265,6 +356,18 @@ export interface Domain {
    * @returns every item caught so far.
    */
   listItems(): Promise<readonly Item[]>;
+
+  /**
+   * Every **link** that has grown between the user's terms.
+   *
+   * Links belong to no single drop — they are the accumulation itself, and one
+   * of them can join a term said today to one said months ago. Each carries its
+   * kind, a comparable strength and the reason it exists, because a connection
+   * the user cannot account for is a connection they cannot trust.
+   *
+   * @returns every link, oldest first.
+   */
+  listLinks(): Promise<readonly TermLink[]>;
 
   /**
    * Run extraction on a drop that has not been read yet, and report the outcome.
