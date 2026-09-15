@@ -136,6 +136,7 @@ export interface FakeProvider extends AiProvider {
   /** Every question the domain asked it to parse, in order. */
   readonly askedQuestions: readonly string[];
 }
+
 /**
  * What an unscripted drop reads as.
  *
@@ -172,11 +173,15 @@ function isFailure(script: AnyScript): script is FailureScript {
 
 function runRespond(script: RespondScript | undefined): Promise<RespondResult> {
   if (script === undefined) {
-    // Unscripted input still gets an answer, and it is the plain acknowledgement
+    // Unscripted input still gets an answer, and it is a plain acknowledgement
     // rather than an echo of the drop: an echo grows past the reply's length
     // limit on a long fragment, so the fake's own default would break a rule
     // every real reply has to keep.
-    return Promise.resolve({ reply: '接住了。' });
+    //
+    // Deliberately not the same sentence as the domain's own fallback line. A
+    // default that coincided with it could not be told apart from it, and the
+    // fake would be quietly standing in for behaviour it does not have.
+    return Promise.resolve({ reply: '记下了。' });
   }
   if (isFailure(script)) return fail(script);
   return Promise.resolve({ reply: script.reply });

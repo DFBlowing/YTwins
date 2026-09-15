@@ -9,8 +9,10 @@
 |---|---|---|
 | [`check-workspace.mjs`](check-workspace.mjs) | 检查目录布局有没有违例（根目录杂物、`.scratch/` 里的非 tracker 目录、effort 目录里的杂物、`archive/` 里的大文件）。按需运行，不拦截任何操作 | `node tools/check-workspace.mjs` |
 
-**一次性的端到端验收脚本**（按 ticket 编号命名，验收完就留着当回归用；它们不属于上面的「长期工具」，
-但也没别的地方可放）：
+**一次性的端到端验收脚本**（`e2e-ticket-<NN>.mjs`，一个 ticket 一个）：它们按
+[`docs/agents/workspace-layout.md`](../docs/agents/workspace-layout.md) §`tools/` 里那条**已命名的例外**放在这里 ——
+不是「长期工具」，而是**回归**：每改一次领域代码，重跑一遍这些脚本，看跨层的链路有没有被改坏。所以它们留在
+git 里（`archive/` 不进 git），并且每个都在这张表里占一行。
 
 | 脚本 | 验什么 | 入口 |
 |---|---|---|

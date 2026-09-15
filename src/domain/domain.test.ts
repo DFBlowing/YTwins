@@ -58,6 +58,16 @@ async function withDatabase(body: (file: string) => Promise<void>): Promise<void
 /** A drop whose text mixes an item with a feeling, straight from the spec's demo. */
 const MIXED_DROP = '老师今天讲了期末怎么算分，下周三交提纲，好烦';
 
+/**
+ * A line that obeys every mechanical rule.
+ *
+ * Declared here rather than beside the reply checks because an earlier check
+ * needs it too: the reply rules are the difference between "the drop was
+ * answered" and "the provider's line came back", and both are asserted before
+ * this file ever reaches the reply section.
+ */
+const GOOD_REPLY = '听起来今天挺累的。';
+
 console.log('domain core — dropping');
 
 await check('a drop hands back the same text it caught', async () => {
@@ -212,11 +222,11 @@ await check('the reply never waits on the provider, even one that answers instan
       // one replace it only after it has been checked — so the styled line not
       // being here is what keeps the "not waiting" claim falsifiable.
       const provider = createFakeProvider({
-        fallback: { kind: 'reply', reply: '听起来今天挺累的。' },
+        fallback: { kind: 'reply', reply: GOOD_REPLY },
       });
       const result = await createDomain({ store, provider }).drop(MIXED_DROP);
 
-      assert.notEqual(result.reply, '听起来今天挺累的。', 'the drop returned before the provider answered');
+      assert.notEqual(result.reply, GOOD_REPLY, 'the drop returned before the provider answered');
       assert.ok(result.reply.trim().length > 0, 'and the user was answered anyway');
     } finally {
       await store.close();
@@ -962,8 +972,20 @@ const STOP_DROP = '算了，不想说了';
 /** A drop that explicitly asks what to do — the one licence to advise. */
 const ADVICE_DROP = '这件事我该怎么办';
 
-/** A line that obeys every mechanical rule, so nothing about it needs fixing. */
-const GOOD_REPLY = '听起来今天挺累的。';
+/**
+ * Ordinary fragments that merely *look* like they carry a cue.
+ *
+ * Chinese has no word boundaries, so substring reading finds 「烦」 in 「麻烦」,
+ * 「怕」 in 「哪怕」 and 「算了」 in 「算了算」. Each of these has to come back as a
+ * plain record confirmation: answering an ordinary drop with a feeling it never
+ * had is the one thing this reading must not do, and a false positive here also
+ * decides what the provider is told.
+ */
+const LOOKALIKE_DROPS: readonly string[] = [
+  '明天下午三点开会，有点麻烦',
+  '哪怕下雨也要去',
+  '我算了算时间，还剩三天',
+];
 
 /**
  * The lines code itself can vouch for, one per situation.
@@ -980,15 +1002,23 @@ const SAFE_RECORDED_REPLY = '接住了。';
  * Replies that each break exactly one mechanical rule.
  *
  * Asserted one at a time rather than all at once, so a rule that stopped firing
- * cannot hide behind another that still does.
+ * cannot hide behind another that still does. `body` and `expected` are for the
+ * cases whose rule only exists in one situation, or whose fallback line is
+ * therefore a different one.
  */
-const RULE_BREAKERS: readonly { readonly why: string; readonly reply: string }[] = [
+const RULE_BREAKERS: readonly {
+  readonly why: string;
+  readonly reply: string;
+  readonly body?: string;
+  readonly expected?: string;
+}[] = [
   { why: 'a question that asks why', reply: '你为什么这么想？' },
   { why: 'a second question', reply: '是这样吗？还是那样？' },
   { why: 'a word that judges the user', reply: '别想那么多。' },
   { why: 'a pet name', reply: '亲爱的，我记下了。' },
   { why: 'a contrast ending', reply: '我记下了，不过你也别太累。' },
   { why: 'an order', reply: '你应该早点睡。' },
+  { why: 'nothing in it at all', reply: '   ' },
   {
     why: 'four sentences',
     reply: '第一件事是这样。第二件事是那样。第三件事还有别的。第四件事也有。',
@@ -999,6 +1029,12 @@ const RULE_BREAKERS: readonly { readonly why: string; readonly reply: string }[]
       '今天的事情是这样的一件接着一件地来，先是要交提纲，然后是小组讨论，接着还有一份报告要写，最后还有一次课堂展示要准备，另外还要把英语单词背一遍。',
   },
   { why: 'no Chinese in it at all', reply: 'Got it, noted down.' },
+  {
+    why: 'a question as its first sentence on an emotional drop',
+    reply: '是这样吗？',
+    body: MIXED_DROP,
+    expected: SAFE_EMOTION_REPLY,
+  },
 ];
 
 await check('an emotional drop is answered at once, and the styled line takes that place', async () => {
@@ -1062,16 +1098,14 @@ await check('the rules and the situation travel to the provider', async () => {
       const domain = createDomain({ store, provider });
       await domain.drop(MIXED_DROP);
       await domain.drop(PLAIN_DROP);
-      await domain.drop(STOP_DROP);
       await domain.drop(ADVICE_DROP);
-      await settledUntil(async () => requests.length >= 4);
+      await settledUntil(async () => requests.length >= 3);
 
-      const [emotional, plain, stopping, asking] = requests;
-      assert.equal(emotional?.situation.emotionPresent, true, 'the feeling in this drop was named');
-      assert.equal(plain?.situation.emotionPresent, false, 'and a plain one was not turned into one');
-      assert.equal(stopping?.situation.stopRequested, true, 'the request to stop was passed on');
-      assert.equal(asking?.situation.adviceRequested, true, 'the explicit question was passed on');
-      assert.equal(plain?.situation.adviceRequested, false, 'and a plain one is not licensed to advise');
+      const [emotional, plain, asking] = requests;
+      assert.equal(emotional?.brief.emotionPresent, true, 'the feeling in this drop was named');
+      assert.equal(plain?.brief.emotionPresent, false, 'and a plain one was not turned into one');
+      assert.equal(asking?.brief.adviceRequested, true, 'the explicit question was passed on');
+      assert.equal(plain?.brief.adviceRequested, false, 'and a plain one is not licensed to advise');
       assert.ok(
         (emotional?.instructions.length ?? 0) > 0,
         'the rules themselves travel with every request',
@@ -1143,20 +1177,20 @@ await check('a rule-breaking first attempt is retried, and the retry is told wha
   });
 });
 
-for (const { why, reply } of RULE_BREAKERS) {
+for (const { why, reply, body, expected } of RULE_BREAKERS) {
   await check(`a reply with ${why} is refused`, async () => {
     await withDatabase(async (file) => {
       const store = openSqliteStore(file);
       try {
         const provider = createFakeProvider({ fallback: { kind: 'reply', reply } });
         const domain = createDomain({ store, provider });
-        const dropped = await domain.drop(PLAIN_DROP);
+        const dropped = await domain.drop(body ?? PLAIN_DROP);
         await settledUntil(async () => provider.seen.length >= 2);
 
         assert.equal(
           (await domain.getDrop(dropped.id))?.reply,
-          SAFE_RECORDED_REPLY,
-          `the user was shown the line the provider offered: ${reply}`,
+          expected ?? SAFE_RECORDED_REPLY,
+          `the user was shown ${reply}, which the rules refuse`,
         );
       } finally {
         await store.close();
@@ -1165,26 +1199,57 @@ for (const { why, reply } of RULE_BREAKERS) {
   });
 }
 
-await check('a reply that keeps asking after the user asked to stop is refused', async () => {
+await check('a request to stop is answered by code, and never reaches the provider', async () => {
   await withDatabase(async (file) => {
     const store = openSqliteStore(file);
     try {
-      const requests: RespondRequest[] = [];
-      // One question: it would pass the "at most one question" rule, and only
-      // the stop request makes it wrong — which is what isolates this rule.
-      const provider = createFakeProvider({
-        fallback: { kind: 'reply', reply: '你想说说吗？' },
-        onRespond: (request) => requests.push(request),
-      });
+      // The scripted line is one question and nothing else: it would pass every
+      // string check there is. What makes it wrong is that the user asked to be
+      // left alone — and the guarantee is structural, not a check: the provider
+      // is not consulted at all, so there is no reply of its to refuse.
+      const provider = createFakeProvider({ fallback: { kind: 'reply', reply: '你想说说吗？' } });
       const domain = createDomain({ store, provider });
       const dropped = await domain.drop(STOP_DROP);
-      await settledUntil(async () => provider.seen.length >= 2);
 
       assert.equal(dropped.reply, SAFE_PRESENCE_REPLY, 'only presence is left when the user steps back');
+      assert.deepEqual(provider.seen, [], 'nothing was asked of the provider for this drop');
+
+      // And it stays that way: give the background work every chance to run.
+      await settledUntil(async () => false);
       const shown = (await domain.getDrop(dropped.id))?.reply ?? '';
       assert.equal(shown, SAFE_PRESENCE_REPLY);
       assert.ok(!shown.includes('？'), 'the probing question never reached the user');
-      assert.equal(requests[0]?.situation.stopRequested, true);
+      assert.deepEqual(provider.seen, [], 'the provider was never consulted');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a fragment that merely looks like a cue is answered plainly', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      for (const body of LOOKALIKE_DROPS) {
+        // The provider fails, so the line the user gets is code's own reading —
+        // which is exactly the reading under test here.
+        const provider = createFakeProvider({
+          fallback: { kind: 'fail', reason: 'cloud LLM unreachable' },
+        });
+        const domain = createDomain({ store, provider });
+        const dropped = await domain.drop(body);
+
+        assert.equal(
+          dropped.reply,
+          SAFE_RECORDED_REPLY,
+          `${body} was answered as though it carried something it does not`,
+        );
+        assert.deepEqual(
+          provider.seen,
+          [body],
+          `${body} was not put to the provider at all`,
+        );
+      }
     } finally {
       await store.close();
     }

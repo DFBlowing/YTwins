@@ -37,16 +37,11 @@ const SAFE_RECORDED_REPLY = '接住了。';
 /** A line that passes every check, so it is the one the drop ends up with. */
 const STYLED_REPLY = '听起来今天挺累的。';
 
-/** What the provider offers on both attempts for the badly-behaved drop. */
-const OFFERED = [
-  REPLY_THAT_BREAKS_THE_RULES,
-  REPLY_THAT_BREAKS_THE_RULES,
-];
-
 /**
  * A provider scripted for all four wires: a styled reply that is accepted, a
  * reply that breaks the rules twice, and a reply that asks after being asked to
- * stop.
+ * stop — which must never be reached, because a stop request is answered by
+ * code and never put to a provider at all.
  */
 function provider() {
   return createFakeProvider({
@@ -54,7 +49,7 @@ function provider() {
       [MIXED]: { kind: 'reply', reply: STYLED_REPLY },
       [STOPPING]: { kind: 'reply', reply: '你想说说吗？' },
     },
-    respondAttempts: { [BROKEN]: OFFERED },
+    respondAttempts: { [BROKEN]: [REPLY_THAT_BREAKS_THE_RULES, REPLY_THAT_BREAKS_THE_RULES] },
   });
 }
 
@@ -67,7 +62,8 @@ const seenReplies = [];
 /** Start a real server on an ephemeral port, backed by the given database. */
 async function listen(dbPath) {
   const store = openSqliteStore(dbPath);
-  const domain = createDomain({ store, provider: provider() });
+  const scripted = provider();
+  const domain = createDomain({ store, provider: scripted });
   const server = createServer((req, res) => {
     createHandler(domain)(req, res).catch(() => {
       if (!res.headersSent) res.writeHead(500);
@@ -78,6 +74,8 @@ async function listen(dbPath) {
   const { port } = server.address();
   return {
     base: `http://127.0.0.1:${port}`,
+    /** What the domain actually asked the provider to answer. */
+    asked: scripted.seen,
     close: async () => {
       await new Promise((resolve) => server.close(resolve));
       await store.close();
@@ -179,7 +177,7 @@ try {
     }
   });
 
-  await check('asking after being asked to stop does not reach the user', async () => {
+  await check('asking to stop is answered by code, and never put to the provider', async () => {
     const created = await post(server.base, '/api/drop', { body: STOPPING });
     assert.equal(created.reply, SAFE_PRESENCE_REPLY, 'only presence is left');
 
@@ -187,6 +185,10 @@ try {
     const drop = await get(server.base, `/api/drops/${created.id}`).then((r) => r.drop);
     assert.equal(drop.reply, SAFE_PRESENCE_REPLY);
     assert.ok(!drop.reply.includes('？'), 'the probing question stayed out');
+    assert.ok(
+      !server.asked.includes(STOPPING),
+      'a drop that asks to be left alone must not reach a provider at all',
+    );
   });
 } finally {
   await server.close();

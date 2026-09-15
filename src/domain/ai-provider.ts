@@ -29,14 +29,16 @@ export interface RespondRequest {
   /** The drop's original text. */
   readonly body: string;
   /**
-   * What the drop asks of the reply, as ordinary code read it.
+   * What the reply is being asked for, as ordinary code read it.
    *
-   * Judgement is not delegated here: the flags are mechanical readings of the
-   * text, and what they *imply* for the wording is the instruction's to spell
-   * out. They travel because an instruction the provider cannot see the
-   * situation for is a rule it cannot obey.
+   * Deliberately only the readings a provider can act on. Whether the user
+   * **asked to stop** is a third reading, and it never reaches here: a drop like
+   * that is answered by code, because "leave only the shortest statement of
+   * presence" is not something a string check can hold a model to (see
+   * `parent-voice.ts` and `core.ts`). An instruction the provider cannot act on
+   * is worse than no instruction: it invites an answer nobody wants.
    */
-  readonly situation: ReplySituation;
+  readonly brief: ReplyBrief;
   /**
    * The rules this reply must obey, in the product's own words.
    *
@@ -49,26 +51,24 @@ export interface RespondRequest {
   /**
    * Which rules the previous attempt broke, when this is the one regeneration.
    *
-   * Absent on a first attempt. A retry that was not told what was wrong is a
-   * reroll, and a model asked to try again at random is no likelier to succeed.
+   * Absent on a first attempt. Named by `checkReply`; the port treats them as
+   * opaque labels to put in front of the model, which is why they are plain
+   * strings here rather than a type this module would have to own.
+   *
+   * A retry that is not told what was wrong is a reroll, and a model asked to
+   * try again at random is no likelier to succeed.
    */
   readonly violations?: readonly string[];
 }
 
 /**
- * What a drop asks of its reply, as ordinary code read it out of the text.
+ * What a reply is being asked for, as the provider is told it.
  *
- * Deliberately three booleans and nothing else. Each is a reading, not a
- * judgement: whether the text names a feeling, whether the user asked to stop,
- * whether the user asked what to do. The provider is told them so it can obey
- * the instructions; the domain uses the same readings to check what comes back
- * and to pick the line it falls back to.
+ * Two readings, not three: see `RespondRequest.brief`.
  */
-export interface ReplySituation {
+export interface ReplyBrief {
   /** The text carries a feeling, so the reply's first sentence must name one. */
   readonly emotionPresent: boolean;
-  /** The user said they do not want to talk, so the reply stops asking. */
-  readonly stopRequested: boolean;
   /** The user asked what to do, so advice is licensed this turn. */
   readonly adviceRequested: boolean;
 }

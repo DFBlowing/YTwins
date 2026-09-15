@@ -29,7 +29,7 @@
  * @module domain/core
  */
 
-import type { AiProvider, ExtractResult, ReplySituation } from './ai-provider.ts';
+import type { AiProvider, ExtractResult } from './ai-provider.ts';
 import type {
   Domain,
   DropResult,
@@ -39,11 +39,28 @@ import type {
   RecallResult,
   RecallSource,
 } from './interface.ts';
-import { REPLY_INSTRUCTIONS, checkReply, readSituation, safeReply } from './parent-voice.ts';
+import {
+  REPLY_INSTRUCTIONS,
+  briefFor,
+  checkReply,
+  readSituation,
+  safeReply,
+  type ReplySituation,
+} from './parent-voice.ts';
 import type { DropStore, StoredDrop, StoredItem } from './storage.ts';
 
 /** How many times a provider is asked to answer one drop. One attempt, one retry. */
 const REPLY_ATTEMPTS = 2;
+
+/**
+ * The line code itself can vouch for, for a drop it has only the text of.
+ *
+ * Used where the situation was not read on the way in — a drop recorded before
+ * ticket 03 added the column.
+ */
+function safeLineFor(body: string): string {
+  return safeReply(readSituation(body));
+}
 
 /** What the core needs to run. */
 export interface DomainCoreOptions {
@@ -70,7 +87,7 @@ function toSummary(drop: StoredDrop, items: readonly StoredItem[]): DropSummary 
     items: items.map(toItem),
     // A null reply is a row written before ticket 03, and the line code can
     // vouch for is the honest answer for it: the drop is old, not unanswered.
-    reply: drop.reply ?? safeReply(readSituation(drop.body)),
+    reply: drop.reply ?? safeLineFor(drop.body),
   };
 }
 
@@ -154,11 +171,18 @@ export function createDomain(options: DomainCoreOptions): Domain {
    * is not a third attempt: the drop keeps the line that is known to be safe,
    * which is the only way to promise the user never sees a violating one.
    *
+   * A drop that asks to be left alone stops here. "Leave only the shortest
+   * statement of presence" is a rule about what the product says, not a string
+   * anyone can check a model against — so the provider is not asked at all, and
+   * the answer is the one already written. That is also the answer the moment
+   * wants: someone stepping back should not have a model reach for a sentence.
+   *
    * @param drop - the drop just recorded.
    * @param situation - what that drop asks of its reply.
    */
   async function replyInto(drop: StoredDrop, situation: ReplySituation): Promise<void> {
     if (provider === undefined) return;
+    if (situation.stopRequested) return;
 
     let violations: readonly string[] | undefined;
     for (let attempt = 0; attempt < REPLY_ATTEMPTS; attempt += 1) {
@@ -167,7 +191,7 @@ export function createDomain(options: DomainCoreOptions): Domain {
         candidate = (
           await provider.respond({
             body: drop.body,
-            situation,
+            brief: briefFor(situation),
             instructions: REPLY_INSTRUCTIONS,
             ...(violations === undefined ? {} : { violations }),
           })

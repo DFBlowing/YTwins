@@ -96,6 +96,15 @@ const unavailable = mustFind<HTMLParagraphElement>('#ask-unavailable');
 /** How many times to ask whether a fresh drop has been read, and how often. */
 const POLL_ATTEMPTS = 40;
 const POLL_INTERVAL_MS = 250;
+/**
+ * How many extra rounds to give the drop's **wording** once its reading is in.
+ *
+ * The two are separate background jobs, and the reply is a second round trip
+ * behind the reading — not a second reading. One second of grace is enough to
+ * keep the line above the form and the line in the list saying the same thing;
+ * past that the page shows what the drop has, which is always a real line.
+ */
+const REPLY_GRACE_POLLS = 4;
 
 /** Format a due time in Chinese terms, or say plainly that none was found. */
 function formatDue(dueAt: string | null): string {
@@ -193,26 +202,34 @@ async function loadDrop(dropId: string): Promise<DropSummary | null> {
 }
 
 /**
- * Wait for a just-made drop to be read, then show what it caught.
+ * Wait for a just-made drop to be read, and give its reply a moment to land.
  *
  * The wait is bounded: a provider that never answers must leave the page
  * showing an honest "not read yet" rather than spinning forever. Giving up is
  * not a failure — the drop is already safely stored, and a refresh looks again.
  *
- * The drop's styled **reply** is composed behind it, on its own schedule, so
- * what is returned here is the drop as it stood when the wait ended. The page
- * takes whichever line the drop has, which is never nothing: the line code can
- * vouch for is written when the drop is caught.
+ * The drop's styled **reply** is composed behind it as its own job, so once the
+ * reading is in there is a short grace for the wording too: `pending` is the
+ * line the POST handed back, and a line still equal to it is one the provider
+ * has not replaced yet. When the grace runs out the line stands as it is — it is
+ * a line the drop was caught with, not a placeholder, and the list on the next
+ * load picks up whatever replaced it.
  *
+ * @param dropId - the drop to wait for.
+ * @param pending - the line the drop was caught with.
  * @returns the drop as last read, or null when the server could not answer.
  */
-async function settleDrop(dropId: string): Promise<DropSummary | null> {
+async function settleDrop(dropId: string, pending: string): Promise<DropSummary | null> {
   let latest: DropSummary | null = null;
+  let grace = 0;
   for (let attempt = 0; attempt < POLL_ATTEMPTS; attempt += 1) {
     const drop = await loadDrop(dropId);
     if (drop === null) break;
     latest = drop;
-    if (drop.extracted) break;
+    if (drop.extracted) {
+      if (drop.reply !== pending || grace >= REPLY_GRACE_POLLS) break;
+      grace += 1;
+    }
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
   await loadDrops();
@@ -326,11 +343,11 @@ form.addEventListener('submit', (event) => {
       input.value = '';
 
       // The drop is already caught at this point. What is still running is
-      // reading it and wording the reply, so the list is refreshed once that
-      // has had its chance — and the line above the form is replaced by the
+      // reading it and wording the reply, so the list is refreshed once both
+      // have had their chance — and the line above the form is replaced by the
       // one the drop actually settled on.
       await loadDrops();
-      const settled = await settleDrop(payload.id);
+      const settled = await settleDrop(payload.id, payload.reply);
       if (settled !== null) reply.textContent = settled.reply;
     } catch {
       reply.textContent = '连不上本地服务。';
