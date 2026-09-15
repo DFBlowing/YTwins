@@ -11,18 +11,31 @@ _最后更新：2026-09-15_
 - **边界已澄清**：demo 三幕、数据边界、回应方式、浮现频率、结论链的可见范围都已冻结（见下）。
 - **spec 已写完**：[`spec.md`](./spec.md)（中文主件）与 [`spec.en.md`](./spec.en.md)（英文对照），
   `Status: ready-for-agent`。两份调研都已落地在 `docs/ytwins/`。
-- **tickets 已拆完**：[`issues/`](./issues/) 下 13 张，编号 01–13，各带中英两份，`Status: ready-for-agent`。
-- **没有写任何代码。**
+- **tickets 已拆完**：[`issues/`](./issues/) 下 13 张，编号 01–13，各带中英两份。
+- **01 已实现并提交**（`a55fad6`），`Status: ready-for-human`：工程骨架 + 第一次「丢」打通全链路
+  （真的丢、真的落 SQLite、刷新后仍在）+ 三幕页面骨架（只有第一幕接真实链路）。10/10 领域测试、
+  21/21 检查器测试、`tsc --noEmit` 全绿；已被 `/code-review` 两轴审过。
+- **其余 12 张仍是 `Status: ready-for-agent`。**
 
 这个仓库的第一个 effort slug 是 `ytwins`（`.scratch/ytwins/`、`docs/ytwins/`）。将来另开 effort 时再取新 slug。
 
 ## 下一步
 
-1. **`/implement`** —— 按 frontier 逐张实现（内部走 `/tdd`），收尾跑 `/code-review`。从 **01** 开始。
+1. **接着 `/implement` 02** —— frontier 下一张（02 接住的结构：分出事项与留档）。01 之后 02 与 07 可并行。
 2. **`04` 完成后、`05` 之前插一次 `/prototype`**（2026-09-15 定）—— 见下「prototype 的位置」。
 3. spec 里留了一处**只有人能做**的事：申请并填入云端 LLM 的 API key（服务端环境变量文件）。别把它写进
    agent 的实现 ticket，必要时用 `/wizard` 生成交互脚本。它只在 **12**（真实 provider）之前必须就位 ——
    01–11 全用假 provider，不需要 key。
+
+## 在 01 里踩到的坑（下一张 ticket 会再遇到）
+
+- **`npm install` 与 `vite build` 在本沙箱里会 `spawn EPERM`** —— 前者要跑生命周期脚本，后者是 esbuild
+  启动 service 子进程。两者都需要**一次不设限的执行**。这是沙箱的既定边界，不是 bug，别去改工具链绕它。
+- **`node --test` 用不了**（要 spawn），本机 Node v22.23.2 的 type stripping 是 **strip-only**（枚举之类
+  用不了）。所以领域测试是**自带断言、退出码表达结果**的单文件入口：`node src/domain/domain.test.ts`。
+- **改用 `node:sqlite` 而不是 `better-sqlite3`**（v22.5+ 内置，零运行时依赖，外键级联可用）。
+- **别用 PowerShell 做「读进来—改—写回去」的批量文本替换** —— 会把中文和长破折号编码搞坏（01 里踩过一次，
+  靠 `Select-String -Pattern '閳|锛|鈥|锟'` 揪出来）。要批量改就用 `edit` 工具逐处改。
 
 ## prototype 的位置（2026-09-15 定）
 
