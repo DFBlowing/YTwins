@@ -65,12 +65,14 @@ Both axes found real problems. All are fixed; below is **what changed** and **wh
 
 **Deliberately unchanged, with reasons.**
 
-- **Answers are statements, not "你似乎…"** (Standards finding 2). The 不确定语气 rule in
-  `parent-voice-principles.md` binds **surfaced conclusions and collided answers**, because wording must match
-  supporting evidence. A recall answer is a fact **looked up from the user's own record** and verifiable against
-  the verbatim original — not a conclusion inferred from fragments — so hedging it would be worse. Whether the
-  wording should be unified is an ambiguity created by `CONTEXT.md`'s 追溯 entry also calling its output 答案;
-  **that call is the product author's** (editing the glossary's meaning is not an agent's to make unilaterally).
+- **Answers are statements, not "你似乎…"** (Standards finding 2). **The product author supplied a more fundamental
+  test than "which feature produced it"**: an AI only ever holds a **partial portrait**, never the whole, so any
+  **judgment** it makes may not be a fact → judgments are always hedged. **Facts already determinate outside the
+  user** (the grading scheme the teacher gave, the sentence the user themself said) are stated plainly; hedging a
+  fact is equally dishonest. Recall answers the latter, so it does not hedge — the reason is that the *content* is a
+  fact, not that recall is exempt as a feature. This test now lives in `CONTEXT.md` (the new 判断 and 事实 terms) and
+  in rule 1 of `docs/ytwins/parent-voice-principles.md`; the wording in `spec.md` that called recall's output 答案
+  was corrected too, since that wording was the source of the ambiguity.
 - **No confidence on `ComposeAnswerResult`** (Spec finding 3). The spec's port description has `compose` supply
   confidence, but confidence exists to grade **surfacing** wording (supporting terms, link strength, time span),
   which is ticket 06's area. Adding a field nothing reads would be speculative design; it can arrive with 06.

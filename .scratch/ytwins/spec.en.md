@@ -232,8 +232,9 @@ reply is"), not storage-shaped ones (no tables, no id assembly, no SQL). At mini
 
 - **Drop once**: returns the item produced by this drop (possibly none), the record, the extracted terms, and the
   reply given to the user.
-- **Ask for recall**: returns an answer plus its source (which drop or drops); when recall fails it returns an
-  explicit "not found" result rather than inventing one.
+- **Ask for recall**: returns an answer grounded in the **facts** held in the records, plus its source (which drop or
+  drops); when recall fails it returns an explicit "not found" result rather than inventing one. What it answers are
+  facts, not **judgments**, so they are stated plainly without hedging (see `CONTEXT.md`).
 - **Request a surfacing**: returns zero or one conclusion/answer; zero is a normal outcome (in cooldown, or support
   too thin).
 - **Read the portrait / read the conclusion chain**: read-only views including each conclusion's supporting terms and

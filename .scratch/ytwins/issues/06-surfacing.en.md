@@ -16,6 +16,6 @@ insufficient support it prefers not to surface, or says plainly "I'm not really 
 - [ ] The same topic does not surface twice within **7 days**.
 - [ ] A **topic** is engineered as "semantic overlap of the supporting term sets" — overlap above an internal ratio carried by a configurable constant counts as the same topic.
 - [ ] Surfaced content is always uncertain in tone, and the strength of the wording is mapped from explainable numbers — supporting term count, average link strength, time span — never chosen freely by the model.
-- [ ] Uncertain tone applies only to **answers** and **surfacings**; it never rewrites an ordinary **reply**.
+- [ ] Uncertain tone applies only to **judgments** (**answers** and **surfacings**); it never rewrites an ordinary **reply**. The test is in `CONTEXT.md` under 判断 / 事实: what it constrains is a **judgment**, not a **fact** — content already determinate outside the user is stated plainly, and hedging a fact is equally dishonest. **Recall** answers facts, so it is outside this rule (07 is done and its answers are statements); do not hedge those too.
 - [ ] With insufficient support it does not surface, or says plainly "I'm not really sure", rather than burning trust with an assertion.
 - [ ] Every surfacing leaves a record, so cooldown still holds after a restart.
