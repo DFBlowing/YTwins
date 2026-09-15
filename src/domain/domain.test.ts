@@ -543,6 +543,402 @@ await check('with no provider at all, a drop still catches its record', async ()
   });
 });
 
+console.log('\ndomain core — recall');
+
+/** The drop the demo's act two asks about, plus one that must not be recalled. */
+const GRADING_DROP = '老师今天讲了期末怎么算分：平时分 40%，期末考 60%，下周三交提纲';
+const OUTLINE_DROP = '提纲要求下周交，格式和期末怎么算分有关';
+const PLANT_DROP = '楼下的咖啡店换了个新豆子';
+const ANSWER = '平时分 40%，期末考 60%。';
+
+/**
+ * A provider scripted for recall: the question parses to what to look for, and
+ * composing an answer is a fixed string. Both ends of recall leave through the
+ * port, so scripting them is what makes these checks deterministic.
+ */
+function recallProvider(): ReturnType<typeof createFakeProvider> {
+  return createFakeProvider({
+    parseQuestionByQuestion: { 期末怎么算分: { kind: 'match', matchText: ['期末', '算分'] } },
+    composeFallback: { kind: 'answer', answer: ANSWER },
+  });
+}
+
+await check('a question that hits a record answers, and names the drop it came from', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const domain = createDomain({ store, provider: recallProvider() });
+      const grading = await domain.drop(GRADING_DROP);
+      await domain.drop(PLANT_DROP);
+
+      const result = await domain.recall('期末怎么算分');
+      assert.equal(result.kind, 'answered', 'the record covering this question was found');
+      if (result.kind !== 'answered') return;
+      assert.equal(result.answer, ANSWER);
+      assert.deepEqual(
+        result.sources.map((source) => source.dropId),
+        [grading.id],
+        'the answer names the drop it came from',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('every matching drop is cited, not just the first', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const domain = createDomain({ store, provider: recallProvider() });
+      const grading = await domain.drop(GRADING_DROP);
+      const outline = await domain.drop(OUTLINE_DROP);
+      await domain.drop(PLANT_DROP);
+
+      const result = await domain.recall('期末怎么算分');
+      assert.equal(result.kind, 'answered');
+      if (result.kind !== 'answered') return;
+
+      // Two drops cover this question, and the composer was handed both — so
+      // both are cited. Showing only one would tell the user the answer came
+      // from a drop the composer may not have used.
+      assert.deepEqual(
+        result.sources.map((source) => source.dropId),
+        [grading.id, outline.id],
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('the answer carries the verbatim originals, not a summary', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const domain = createDomain({ store, provider: recallProvider() });
+      await domain.drop(GRADING_DROP);
+
+      const result = await domain.recall('期末怎么算分');
+      assert.equal(result.kind, 'answered');
+      if (result.kind !== 'answered') return;
+      assert.deepEqual(
+        result.sources.map((source) => source.body),
+        [GRADING_DROP],
+        'the user can check the answer against their own words',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a question nothing covers says so, and answers nothing', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      let composed = 0;
+      const provider = createFakeProvider({
+        parseQuestionByQuestion: { 量子力学考试: { kind: 'match', matchText: ['量子力学'] } },
+        composeFallback: { kind: 'answer', answer: '你似乎提过量子力学。' },
+        onCompose: () => {
+          composed += 1;
+        },
+      });
+      const domain = createDomain({ store, provider });
+      await domain.drop(GRADING_DROP);
+
+      const result = await domain.recall('量子力学考试');
+      assert.equal(result.kind, 'not-found', 'nothing covers this question');
+      assert.equal(composed, 0, 'no answer was generated for a question with no support');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a question that yields nothing to look for answers nothing', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      let composed = 0;
+      const provider = createFakeProvider({
+        // A blank needle would match every record, since every string contains
+        // the empty string. "I have nothing to look for" must not become
+        // "everything answers this".
+        parseQuestionByQuestion: { 嗯: { kind: 'match', matchText: ['', '   '] } },
+        composeFallback: { kind: 'answer', answer: '不该出现。' },
+        onCompose: () => {
+          composed += 1;
+        },
+      });
+      const domain = createDomain({ store, provider });
+      await domain.drop(GRADING_DROP);
+
+      const result = await domain.recall('嗯');
+      assert.equal(result.kind, 'not-found');
+      assert.equal(composed, 0, 'blank needles must not reach the composer');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('an explicit empty result is returned even when records exist', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const domain = createDomain({ store, provider: recallProvider() });
+      await domain.drop(PLANT_DROP); // a record exists, but it does not cover the question
+
+      const result = await domain.recall('期末怎么算分');
+      assert.equal(
+        result.kind,
+        'not-found',
+        'having some records is not the same as having this answer',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('recall on an empty database says it found nothing', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const domain = createDomain({ store, provider: recallProvider() });
+      const result = await domain.recall('期末怎么算分');
+      assert.equal(result.kind, 'not-found');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('the question goes through the provider port', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = recallProvider();
+      const domain = createDomain({ store, provider });
+      await domain.drop(GRADING_DROP);
+      await domain.recall('期末怎么算分');
+
+      assert.deepEqual(provider.askedQuestions, ['期末怎么算分'], 'the question was parsed by the provider');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('the answer is composed by the provider, from the records it matched', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const seen: string[] = [];
+      const provider = createFakeProvider({
+        parseQuestionByQuestion: { 期末怎么算分: { kind: 'match', matchText: ['期末', '算分'] } },
+        composeFallback: { kind: 'answer', answer: ANSWER },
+        onCompose: (request) => {
+          seen.push(...request.records.map((record) => record.body));
+        },
+      });
+      const domain = createDomain({ store, provider });
+      await domain.drop(GRADING_DROP);
+
+      await domain.recall('期末怎么算分');
+      assert.deepEqual(seen, [GRADING_DROP], 'the composer was handed the matched record');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a pinned time basis changes the wording the composer sees', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const bases: string[] = [];
+      const provider = createFakeProvider({
+        parseQuestionByQuestion: { 期末怎么算分: { kind: 'match', matchText: ['期末', '算分'] } },
+        composeFallback: { kind: 'answer', answer: ANSWER },
+        onCompose: (request) => {
+          bases.push(request.now);
+        },
+      });
+      const domain = createDomain({ store, provider });
+      await domain.drop(GRADING_DROP);
+
+      await domain.recall('期末怎么算分', { now: '2026-09-20T09:00:00.000Z' });
+      assert.deepEqual(bases, ['2026-09-20T09:00:00.000Z'], 'the pinned basis reached the composer');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('the time basis does not change what is recalled', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const domain = createDomain({ store, provider: recallProvider() });
+      const grading = await domain.drop(GRADING_DROP);
+
+      const soon = await domain.recall('期末怎么算分', { now: '2026-09-16T09:00:00.000Z' });
+      const later = await domain.recall('期末怎么算分', { now: '2027-03-01T09:00:00.000Z' });
+
+      assert.equal(soon.kind, 'answered');
+      assert.equal(later.kind, 'answered');
+      if (soon.kind !== 'answered' || later.kind !== 'answered') return;
+      assert.deepEqual(
+        soon.sources.map((source) => source.dropId),
+        later.sources.map((source) => source.dropId),
+        'the same records are recalled either way',
+      );
+      assert.equal(soon.sources[0]?.dropId, grading.id);
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('recall still works with no pinned basis', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const domain = createDomain({ store, provider: recallProvider() });
+      await domain.drop(GRADING_DROP);
+
+      const result = await domain.recall('期末怎么算分');
+      assert.equal(result.kind, 'answered', 'pinning a basis is optional');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a provider that cannot read the question says it could not look', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      // The failure is scripted on the call the test names, so the path really
+      // is exercised rather than short-circuiting before it.
+      const provider = createFakeProvider({
+        parseQuestionFallback: { kind: 'fail', reason: 'cloud LLM unreachable' },
+      });
+      const domain = createDomain({ store, provider });
+      await domain.drop(GRADING_DROP);
+
+      const result = await domain.recall('期末怎么算分');
+      assert.equal(
+        result.kind,
+        'unavailable',
+        'nothing was searched, so this must not claim that nothing covers the question',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a question parser that throws synchronously is reported the same way', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = createFakeProvider({
+        parseQuestionFallback: { kind: 'throw', reason: 'provider constructor blew up' },
+      });
+      const domain = createDomain({ store, provider });
+      await domain.drop(GRADING_DROP);
+
+      const result = await domain.recall('期末怎么算分');
+      assert.equal(result.kind, 'unavailable');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a composer that fails reports that the question could not be answered', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = createFakeProvider({
+        parseQuestionByQuestion: { 期末怎么算分: { kind: 'match', matchText: ['期末', '算分'] } },
+        composeFallback: { kind: 'fail', reason: 'composition refused' },
+      });
+      const domain = createDomain({ store, provider });
+      await domain.drop(GRADING_DROP);
+
+      const result = await domain.recall('期末怎么算分');
+      assert.equal(result.kind, 'unavailable');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('with no provider at all, recall says it could not look', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const domain = createDomain({ store });
+      await domain.drop(GRADING_DROP);
+
+      const result = await domain.recall('期末怎么算分');
+      assert.equal(result.kind, 'unavailable');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a blank answer is not accepted as an answer', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = createFakeProvider({
+        parseQuestionByQuestion: { 期末怎么算分: { kind: 'match', matchText: ['期末', '算分'] } },
+        composeFallback: { kind: 'answer', answer: '   ' },
+      });
+      const domain = createDomain({ store, provider });
+      await domain.drop(GRADING_DROP);
+
+      // An answer of whitespace would render as "answered" with an empty line
+      // beside a source — exactly the confusion this result shape exists to
+      // prevent, so it must not be reachable.
+      const result = await domain.recall('期末怎么算分');
+      assert.notEqual(result.kind, 'answered', 'whitespace is not an answer');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('the recalled source is the drop the match hit, not merely the newest', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const domain = createDomain({ store, provider: recallProvider() });
+      const grading = await domain.drop(GRADING_DROP);
+      await domain.drop('今天中午吃了牛肉面');
+      await domain.drop('地铁上看到一只很胖的橘猫');
+
+      const result = await domain.recall('期末怎么算分');
+      assert.equal(result.kind, 'answered');
+      if (result.kind !== 'answered') return;
+      assert.deepEqual(
+        result.sources.map((source) => source.dropId),
+        [grading.id],
+        'the newest drop is not the answer to every question',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
 console.log(`\n${checks - failures}/${checks} checks passed`);
 if (failures > 0) {
   console.error(`${failures} check(s) failed`);

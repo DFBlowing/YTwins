@@ -99,14 +99,103 @@ export interface DropSummary {
 }
 
 /**
+ * Where an answer came from: one drop it was recalled out of.
+ *
+ * The **body** is the point of this type. Recall's whole promise is that the
+ * user can check the answer against what they actually typed, so the verbatim
+ * original travels with the answer rather than being fetched separately — a
+ * second lookup could fail, or find something the answer was not based on.
+ */
+export interface RecallSource {
+  /** Identity of the drop the answer came from. */
+  readonly dropId: string;
+  /** The user's original words, byte-for-byte. */
+  readonly body: string;
+  /** When that drop was recorded, as an ISO-8601 string. */
+  readonly droppedAt: string;
+}
+
+/**
+ * The outcome of asking a question of the user's **records**.
+ *
+ * A discriminated union rather than an optional answer, because the difference
+ * between "here is your answer" and "I could not answer that" is the whole point
+ * of this feature. A caller cannot reach either without having decided which it
+ * got, and there is no shape in which an empty string can be mistaken for an
+ * answer.
+ *
+ * The two failures are kept apart on purpose. `not-found` says **the user's
+ * records do not cover this** — a claim about their data. `unavailable` says
+ * **the question could not be put to them at all** — a claim about this attempt.
+ * Collapsing them would let a provider outage be reported to the user as "you
+ * never wrote about this", which is a lie about their own records and the one
+ * thing this feature must never do.
+ */
+export type RecallResult =
+  | {
+      /** The question was answered from the records. */
+      readonly kind: 'answered';
+      /** The answer sentence. */
+      readonly answer: string;
+      /**
+       * Every drop the answer was composed from, oldest first. Never empty.
+       *
+       * All of them, not one: the composer is handed every match and may draw
+       * on any of them, so citing a single "main" source would name a drop the
+       * answer may not have come from — and being able to check the answer is
+       * the reason the source is shown at all.
+       */
+      readonly sources: readonly RecallSource[];
+    }
+  | {
+      /**
+       * The records were searched, and nothing in them covers this question.
+       *
+       * A real answer, not a failure: the product is trusted precisely because
+       * it says this instead of inventing something plausible.
+       */
+      readonly kind: 'not-found';
+    }
+  | {
+      /**
+       * The question could not be put to the records at all.
+       *
+       * Nothing was searched, so no claim is made about what the records do or
+       * do not contain. Distinguished from `not-found` so the user is never
+       * told their own records lack something that was never looked for.
+       */
+      readonly kind: 'unavailable';
+    };
+
+/**
+ * What a caller may pin when recalling.
+ *
+ * A named object rather than positional arguments because the pinned moment and
+ * the question travel together through every layer — the page, the API, the
+ * core and the port — and naming them once keeps that path legible.
+ */
+export interface RecallOptions {
+  /**
+   * The moment to answer *as of*, as an ISO-8601 string.
+   *
+   * Lets the demo hold the "a few days later" viewpoint without waiting, which
+   * is what makes this step verifiable early. It changes how the answer is
+   * worded and how it refers to time; it never changes which records answer the
+   * question. Defaults to the real present.
+   */
+  readonly now?: string;
+}
+
+/**
  * The domain core.
  *
  * Ticket 01 opened exactly one operation: **dropping**. Ticket 02 opened what
  * dropping turns out to mean — a drop is split into **items** and a **record**.
- * The remaining operations named in the spec's interface (recall, surfacing,
- * portrait, chain, scheduling, deletion) arrive with their own tickets — this
- * interface grows, it does not get pre-declared with stubs that would fake
- * behaviour.
+ * Ticket 07 opens **recall**: asking a question of those records and being told
+ * both the answer and which drop it came from. The remaining operations named
+ * in the spec's interface (surfacing, portrait, chain, scheduling, deletion)
+ * arrive with their own tickets — this interface grows, it does not get
+ * pre-declared with stubs that would fake behaviour.
  */
 export interface Domain {
   /**
@@ -178,4 +267,23 @@ export interface Domain {
    *   is no such drop.
    */
   extract(dropId: string): Promise<DropSummary | null>;
+
+  /**
+   * Ask a question of the user's **records**.
+   *
+   * Returns the answer together with every drop it was composed from, or an
+   * explicit failure that distinguishes "your records do not cover this"
+   * (`not-found`) from "the question could not be put to them" (`unavailable`).
+   * It never invents an answer.
+   *
+   * Both ends go through the AI provider port, but the *selection* between them
+   * does not: which records answer the question is decided by ordinary code, so
+   * the same question recalls the same records every time and "nothing matched"
+   * is a fact about the data rather than a model's opinion.
+   *
+   * @param question - the question as typed.
+   * @param options - optionally, the moment to answer as of.
+   * @returns the answer and its sources, or an explicit failure.
+   */
+  recall(question: string, options?: RecallOptions): Promise<RecallResult>;
 }

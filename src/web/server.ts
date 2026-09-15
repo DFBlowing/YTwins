@@ -7,8 +7,9 @@
  *
  * **The API key boundary lives here.** Any credential for a cloud provider is
  * read from the server's environment and used only on this side; nothing that
- * reaches the browser ever carries one. At this stage no provider is wired up
- * at all, which is the strongest form of that guarantee.
+ * reaches the browser ever carries one. The provider wired up at this stage is
+ * the local demo stand-in, which holds no credential at all — so the boundary
+ * is intact for the strongest possible reason, not merely by convention.
  *
  * Run it with: `node src/web/server.ts`
  *
@@ -24,6 +25,7 @@ import { fileURLToPath } from 'node:url';
 import { createDomain } from '../domain/core.ts';
 import type { Domain } from '../domain/interface.ts';
 import { openSqliteStore } from '../domain/sqlite-store.ts';
+import { createDemoProvider } from './demo-provider.ts';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
 const REPO_ROOT = resolve(HERE, '..', '..');
@@ -128,6 +130,38 @@ export function createHandler(domain: Domain) {
       return;
     }
 
+    // Ask a question of what has been kept. The answer and the drop it came from
+    // travel back together: the page shows the source so the user can check the
+    // answer against their own words.
+    if (request.method === 'POST' && url === '/api/recall') {
+      try {
+        const parsed = JSON.parse(await readBody(request)) as { question?: unknown; now?: unknown };
+        const question = typeof parsed.question === 'string' ? parsed.question : '';
+        if (question.trim().length === 0) {
+          sendJson(response, 400, { error: '问题内容是空的' });
+          return;
+        }
+        // The pinned moment is the demo's "a few days later" viewpoint. It is
+        // only passed through when the page actually sent one, so a request
+        // without it gets the real present rather than an invented date.
+        const options =
+          typeof parsed.now === 'string' && parsed.now.trim().length > 0
+            ? { now: parsed.now }
+            : undefined;
+        const result = await domain.recall(question, options);
+        // "Found nothing" is a 200, not a 404. It is a real answer about the
+        // user's data, and the page renders it as one — turning it into an error
+        // status would push the page towards showing a failure rather than the
+        // honest outcome the product promises.
+        sendJson(response, 200, result);
+      } catch (error) {
+        sendJson(response, 500, {
+          error: error instanceof Error ? error.message : '追溯失败',
+        });
+      }
+      return;
+    }
+
     // Everything the page already dropped — this is what survives a refresh.
     if (request.method === 'GET' && url === '/api/drops') {
       try {
@@ -196,10 +230,12 @@ export function createHandler(domain: Domain) {
 }
 
 async function main(): Promise<void> {
-  // No AI provider is wired up yet: tickets 01–11 all run on a fake, and the
-  // real one arrives in ticket 12 together with the key a human must supply.
+  // The provider is the demo's stand-in: tickets 01–11 all run on a fake, and
+  // the real one arrives in ticket 12 together with the key a human must supply.
+  // It has to be wired up even so — without it, asking a question could only
+  // ever come back "found nothing", and act two would have nothing to show.
   const store = openSqliteStore(process.env['YTwins_DB'] ?? DEFAULT_DB);
-  const domain = createDomain({ store });
+  const domain = createDomain({ store, provider: createDemoProvider() });
 
   const server = createServer((request, response) => {
     // One handler rejection must never be an unhandled rejection: that would

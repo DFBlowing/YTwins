@@ -17,11 +17,23 @@
  * are read out of it and do — which is exactly why the record survives an
  * extraction that never happens.
  *
+ * Ticket 07 gives the **record** its purpose: **recall**. Asking a question of
+ * what was kept, and being told both the answer and which drop it came from, is
+ * the whole reason the original is stored verbatim rather than summarised.
+ *
  * @module domain/core
  */
 
 import type { AiProvider, ExtractResult } from './ai-provider.ts';
-import type { Domain, DropResult, DropSummary, Item } from './interface.ts';
+import type {
+  Domain,
+  DropResult,
+  DropSummary,
+  Item,
+  RecallOptions,
+  RecallResult,
+  RecallSource,
+} from './interface.ts';
 import type { DropStore, StoredDrop, StoredItem } from './storage.ts';
 
 /**
@@ -197,5 +209,73 @@ export function createDomain(options: DomainCoreOptions): Domain {
       await extractInto(drop);
       return readDrop(dropId);
     },
+
+    async recall(question: string, options?: RecallOptions): Promise<RecallResult> {
+      // No provider means the question cannot be put to the records at all. That
+      // is `unavailable`, not `not-found`: nothing was searched, so claiming the
+      // records do not cover the question would be a claim about the user's own
+      // data that nobody checked.
+      if (provider === undefined) return { kind: 'unavailable' };
+
+      // What to look for. The model reads the question; it does not read the
+      // records, and it never decides whether an answer exists.
+      let matchText: readonly string[];
+      try {
+        matchText = (await provider.parseQuestion({ question })).matchText;
+      } catch {
+        // A provider that is down, refuses, or blows up must not become an
+        // invented answer, and must not be reported as a fact about the data.
+        return { kind: 'unavailable' };
+      }
+
+      // Blank entries are discarded before matching. A model that returned `['']`
+      // or whitespace would otherwise match every drop, since every string
+      // contains the empty string — turning "I have nothing to look for" into
+      // "everything answers this question", which is exactly backwards.
+      const wanted = matchText.map((text) => text.trim()).filter((text) => text.length > 0);
+      if (wanted.length === 0) return { kind: 'not-found' };
+
+      // Selection is plain code, not a model call: a drop matches when any of
+      // the text appears in it. That is what makes "found nothing" a fact about
+      // the data rather than an opinion, and the same question recalls the same
+      // records every time. `listDrops` is oldest-first, so this order is stable.
+      const sources: readonly RecallSource[] = (await store.listDrops())
+        .filter((drop) => wanted.some((text) => drop.body.includes(text)))
+        .map(toRecallSource);
+      if (sources.length === 0) return { kind: 'not-found' };
+
+      // The moment to answer *as of*. Pinned by the caller for the demo's
+      // "a few days later" viewpoint, otherwise now. It reaches the composer
+      // only, so it can change how the answer reads but never what was found.
+      const now = options?.now ?? new Date().toISOString();
+
+      let answer: string;
+      try {
+        answer = (await provider.composeAnswer({ question, records: sources, now })).answer;
+      } catch {
+        return { kind: 'unavailable' };
+      }
+
+      // An answer of nothing is not an answer. Without this, a provider
+      // returning whitespace would produce `kind: 'answered'` with an empty line
+      // beside a source — the exact confusion this result shape exists to rule
+      // out — so it is refused here rather than rendered.
+      if (answer.trim().length === 0) return { kind: 'unavailable' };
+
+      // Every match is cited, not one chosen "main" source: the composer was
+      // handed all of them and may have drawn on any, so naming a single drop
+      // could show the user an original the answer did not come from. Checking
+      // the answer against the original is the reason a source is shown at all.
+      return { kind: 'answered', answer, sources };
+    },
+  };
+}
+
+/** Present a stored drop as something an answer can cite. */
+function toRecallSource(drop: StoredDrop): RecallSource {
+  return {
+    dropId: drop.id,
+    body: drop.body,
+    droppedAt: drop.droppedAt,
   };
 }

@@ -218,3 +218,139 @@ body {
   border: 1px dashed var(--line);
   border-radius: 0.6rem;
 }
+
+/* Act two: asking. */
+
+.ask-form {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.ask-input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.65rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 0.6rem;
+  background: #fff;
+  color: inherit;
+  font: inherit;
+}
+
+.ask-input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.ask-send {
+  flex: none;
+  padding: 0.5rem 1.4rem;
+  border: none;
+  border-radius: 0.5rem;
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  cursor: pointer;
+}
+
+.ask-send:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.ask-basis {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+}
+
+.ask-basis-input {
+  padding: 0.3rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 0.4rem;
+  background: #fff;
+  color: inherit;
+  font: inherit;
+  font-size: 0.85rem;
+}
+
+.ask-basis-set {
+  padding: 0.3rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 0.4rem;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.ask-error {
+  min-height: 1.7rem;
+  margin: 0.75rem 0 0;
+  color: #9a4a3c;
+}
+
+.answer {
+  margin-top: 1.5rem;
+}
+
+.answer-text {
+  margin: 0 0 1rem;
+  font-size: 1.05rem;
+}
+
+/* The source is shown as a quotation: it is the user's own words, unedited. */
+.answer-source {
+  padding: 0.85rem 1rem;
+  border-left: 3px solid var(--accent);
+  border-radius: 0 0.5rem 0.5rem 0;
+  background: #fff;
+}
+
+.answer-source-label {
+  margin: 0 0 0.4rem;
+  font-size: 0.8rem;
+  letter-spacing: 0.04em;
+  color: var(--ink-soft);
+}
+
+/* One entry per drop the answer was composed from. */
+.answer-source-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.answer-source-item + .answer-source-item {
+  margin-top: 0.6rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--line);
+}
+
+.answer-source-body {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.answer-source-when {
+  display: block;
+  margin-top: 0.4rem;
+  font-size: 0.8rem;
+  color: var(--ink-soft);
+}
+
+/* "Found nothing" is an answer, not a warning: dashed and quiet like the
+   not-yet placeholder, and never red. */
+.not-found {
+  margin-top: 1.5rem;
+  padding: 1rem;
+  border: 1px dashed var(--line);
+  border-radius: 0.6rem;
+  color: var(--ink-soft);
+}

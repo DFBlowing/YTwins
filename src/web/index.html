@@ -8,9 +8,9 @@
   </head>
   <body>
     <!--
-      三幕的页面骨架。三个视图在这里一次成型，但只有第一幕接真实链路。
-      第二幕（问）与第三幕（浮）是空壳 —— 它们不接假数据、不实现逻辑，
-      分别在 07 与 06 里被填实。空的地方就渲染成空，未实现的明确写成未实现。
+      三幕的页面骨架。第一幕（丢）与第二幕（问）都接真实链路：丢真的落库、
+      问真的检索到留档并指出出处。第三幕（浮）仍是空壳，由 06 填实 ——
+      空的地方就渲染成空，未实现的明确写成未实现。
     -->
     <header class="topbar">
       <h1 class="brand">YTwins</h1>
@@ -47,10 +47,45 @@
         </section>
       </section>
 
-      <!-- 第二幕：问。空壳，07 里填实。 -->
+      <!-- 第二幕：问。07 填实：对留档提问，答得出，并指出它来自哪一次投递。 -->
       <section class="act" data-act-panel="ask" hidden>
-        <p class="lede">对这一段时间的留档提问，得到回答并看到它来自哪一次投递。</p>
-        <p class="not-yet" id="ask-not-yet">这一幕还没实现。</p>
+        <p class="lede">对留档提问，得到回答并看到它来自哪一次投递。找不到时会直说没找到。</p>
+
+        <form class="ask-form" id="ask-form">
+          <input
+            id="ask-input"
+            class="ask-input"
+            name="question"
+            type="text"
+            placeholder="比如：期末怎么算分"
+            aria-label="问题"
+            autocomplete="off"
+          />
+          <button type="submit" class="ask-send" id="ask-send">问</button>
+        </form>
+
+        <!--
+          时间基准：demo 里「几天后」的视角。留空就是用现在 —— 这一项只影响
+          答案怎么措辞与怎么引用时间，不影响检索到哪几条。
+        -->
+        <div class="ask-basis">
+          <label class="ask-basis-label" for="ask-now">时间基准</label>
+          <input id="ask-now" class="ask-basis-input" type="datetime-local" />
+          <button type="button" class="ask-basis-set" id="ask-later">设为三天后</button>
+        </div>
+
+        <p class="ask-error" id="ask-error" role="alert"></p>
+
+        <section class="answer" id="ask-answer" hidden>
+          <p class="answer-text" id="ask-answer-text" role="status" aria-live="polite"></p>
+          <div class="answer-source">
+            <p class="answer-source-label">来自这几次投递：</p>
+            <ul class="answer-source-list" id="ask-source-list"></ul>
+          </div>
+        </section>
+
+        <p class="not-found" id="ask-not-found" hidden>留档里没有和这个问题相关的记录。</p>
+        <p class="not-found" id="ask-unavailable" hidden>这次没能查到留档，稍后再试试。</p>
       </section>
 
       <!-- 第三幕：浮。空壳，06 里填实。 -->

@@ -8,14 +8,19 @@
  *
  * This is a test double, but it lives beside the domain rather than inside the
  * test file because later tickets drive their tests through it too. Ticket 02
- * widens it from one operation to two: a drop is both answered and read.
+ * widened it from one operation to two: a drop is both answered and read.
+ * Ticket 07 adds the two ends of recall, scripted the same way.
  *
  * @module domain/fake-provider
  */
 
 import type {
   AiProvider,
+  ComposeAnswerRequest,
+  ComposeAnswerResult,
   ExtractResult,
+  ParseQuestionRequest,
+  ParseQuestionResult,
   RespondRequest,
   RespondResult,
 } from './ai-provider.ts';
@@ -24,9 +29,9 @@ import type { InputType } from './interface.ts';
 /**
  * How a scripted call fails or stalls.
  *
- * Shared by both operations, because the domain's tolerance for a broken
- * provider is the same for both and the tests should not be able to prove it
- * for one and not the other.
+ * Shared by every operation on the port, because the domain's tolerance for a
+ * broken provider is the same for all of them and the tests should not be able
+ * to prove it for one and not the rest.
  */
 export type FailureScript =
   /** Never settle — models a call that is still running. */
@@ -53,6 +58,17 @@ export interface ExtractReading {
 /** What the fake should do for one input, when reading. */
 export type ExtractScript = FailureScript | { readonly kind: 'read'; readonly reading: ExtractReading };
 
+/** What the fake should make of one question. */
+export type ParseQuestionScript =
+  | FailureScript
+  | { readonly kind: 'match'; readonly matchText: readonly string[] };
+
+/** What the fake should answer, once records have been found. */
+export type ComposeScript = FailureScript | { readonly kind: 'answer'; readonly answer: string };
+
+/** Every script this fake understands, so the failure guard can see them all. */
+export type AnyScript = RespondScript | ExtractScript | ParseQuestionScript | ComposeScript;
+
 /** Configure the fake: a default, plus per-body overrides. */
 export interface FakeProviderScript {
   readonly fallback?: RespondScript;
@@ -60,6 +76,19 @@ export interface FakeProviderScript {
   /** What to read out of a drop. Omitting it means every drop reads as empty. */
   readonly extractFallback?: ExtractScript;
   readonly extractByBody?: Readonly<Record<string, ExtractScript>>;
+  /** What to make of a question. Omitting it means every question yields no cues. */
+  readonly parseQuestionFallback?: ParseQuestionScript;
+  readonly parseQuestionByQuestion?: Readonly<Record<string, ParseQuestionScript>>;
+  /** How to answer, once records have been found. */
+  readonly composeFallback?: ComposeScript;
+  /**
+   * Observe each composition as it happens.
+   *
+   * A callback rather than a recorded log, because what a test needs to assert
+   * about composition is usually *what the composer was handed* — the records,
+   * the pinned moment — and those only exist per call.
+   */
+  readonly onCompose?: (request: ComposeAnswerRequest) => void;
 }
 
 /** A handle on the fake, so tests can observe what it was asked. */
@@ -68,6 +97,8 @@ export interface FakeProvider extends AiProvider {
   readonly seen: readonly string[];
   /** Every body the domain asked it to read, in order. */
   readonly read: readonly string[];
+  /** Every question the domain asked it to parse, in order. */
+  readonly askedQuestions: readonly string[];
 }
 
 /**
@@ -91,8 +122,17 @@ function fail(script: FailureScript): never {
   }
 }
 
-function isFailure(script: RespondScript | ExtractScript): script is FailureScript {
-  return script.kind !== 'reply' && script.kind !== 'read';
+/**
+ * Whether a script means "this call fails".
+ *
+ * Written as an allow-list of the *failure* kinds rather than of the success
+ * kinds, so the two mistakes are not equally likely: adding a new failure kind
+ * and forgetting it here fails loudly (the script stops failing), while adding a
+ * new success kind needs no edit at all and can never silently turn into a
+ * throw. The parameter stays the full union, so callers keep narrowing.
+ */
+function isFailure(script: AnyScript): script is FailureScript {
+  return script.kind === 'hang' || script.kind === 'fail' || script.kind === 'throw';
 }
 
 function runRespond(script: RespondScript | undefined, body: string): Promise<RespondResult> {
@@ -112,6 +152,35 @@ function runExtract(script: ExtractScript | undefined): Promise<ExtractResult> {
 }
 
 /**
+ * What an unscripted question yields.
+ *
+ * No match text at all, which the domain reads as "nothing to look for" and
+ * reports as `not-found`. A fake that invented something to look for would
+ * quietly answer questions the test never set up, and a test asserting "found
+ * nothing" would then pass for the wrong reason.
+ */
+const UNSCRIPTED_MATCH: ParseQuestionResult = { matchText: [] };
+
+function runParseQuestion(script: ParseQuestionScript | undefined): Promise<ParseQuestionResult> {
+  if (script === undefined) return Promise.resolve(UNSCRIPTED_MATCH);
+  if (isFailure(script)) return fail(script);
+  return Promise.resolve({ matchText: script.matchText });
+}
+
+function runCompose(script: ComposeScript | undefined): Promise<ComposeAnswerResult> {
+  if (script === undefined) {
+    // Unscripted composition **fails** rather than answering. Composing is the
+    // one call whose output is a sentence presented to the user as fact, so a
+    // fake that defaulted to some placeholder would be inventing an answer —
+    // the single outcome the domain promises never to produce. Tests that reach
+    // this call script it explicitly.
+    return Promise.reject(new Error('no compose script: the fake will not invent an answer'));
+  }
+  if (isFailure(script)) return fail(script);
+  return Promise.resolve({ answer: script.answer });
+}
+
+/**
  * Build a fake provider.
  *
  * @param script - the default behaviour and any per-body overrides.
@@ -120,9 +189,11 @@ function runExtract(script: ExtractScript | undefined): Promise<ExtractResult> {
 export function createFakeProvider(script: FakeProviderScript = {}): FakeProvider {
   const seen: string[] = [];
   const read: string[] = [];
+  const askedQuestions: string[] = [];
   return {
     seen,
     read,
+    askedQuestions,
     // Deliberately NOT `async`. An `async` method would turn the `throw` script
     // into a rejected promise, and the whole point of that script is to hand the
     // domain a genuinely synchronous throw — the shape that a naive
@@ -134,6 +205,16 @@ export function createFakeProvider(script: FakeProviderScript = {}): FakeProvide
     extract(request: RespondRequest): Promise<ExtractResult> {
       read.push(request.body);
       return runExtract(script.extractByBody?.[request.body] ?? script.extractFallback);
+    },
+    parseQuestion(request: ParseQuestionRequest): Promise<ParseQuestionResult> {
+      askedQuestions.push(request.question);
+      return runParseQuestion(
+        script.parseQuestionByQuestion?.[request.question] ?? script.parseQuestionFallback,
+      );
+    },
+    composeAnswer(request: ComposeAnswerRequest): Promise<ComposeAnswerResult> {
+      script.onCompose?.(request);
+      return runCompose(script.composeFallback);
     },
   };
 }
