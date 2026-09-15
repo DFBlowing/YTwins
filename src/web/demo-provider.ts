@@ -22,6 +22,13 @@
  *    moment it is answering as of — that is what makes act two's "a few days
  *    later" basis observable at all.
  *
+ * The **reply** is scripted (ticket 03). It has to be: the demo's fragment
+ * carries a feeling, so a stand-in that fell through to its default would answer
+ * an emotional drop with a bare acknowledgement — exactly the line the parent
+ * voice forbids. Scripting it also keeps the demo honest about what is real: the
+ * reply rules are the domain's, and this is only the sentence a stand-in would
+ * have offered.
+ *
  * Nothing here is intelligence, and nothing here is the product. Replacing this
  * module with a real provider is ticket 12's whole job; the domain core does not
  * change when that happens, which is the point of the port.
@@ -65,6 +72,16 @@ const DEMO_ITEMS = [{ text: '下周三交提纲', dueAt: DEMO_DUE }] as const;
  */
 const DEMO_MATCH_TEXT = ['期末怎么算分', '平时分', '期末考 60%'];
 
+/**
+ * What act one is answered with.
+ *
+ * One sentence, no question, no advice, no pet name: the fragment ends in 好烦,
+ * so this is the emotion reply the first sentence has to be. It names the
+ * feeling rather than restating the fragment, because echoing the user's own
+ * words back is the one thing the doc rules out by name.
+ */
+const DEMO_REPLY = '听着，事情全堆在一起，心里挺堵的。';
+
 /** The facts the demo record contains, restated as an answer. */
 const DEMO_GRADING = '平时分占 40%，期末考占 60%。';
 
@@ -102,6 +119,7 @@ export function composeDemoAnswer(request: ComposeAnswerRequest): string {
  */
 export function createDemoProvider(): AiProvider {
   const fake = createFakeProvider({
+    byBody: { [DEMO_DROP]: { kind: 'reply', reply: DEMO_REPLY } },
     extractByBody: {
       [DEMO_DROP]: {
         kind: 'read',

@@ -35,6 +35,11 @@ import type { DropStore, ExtractOutcome, StoredDrop, StoredItem } from './storag
  * read yet". Without it, extraction could not be re-run without either
  * duplicating items or refusing forever.
  *
+ * `reply` is written with the drop and may be replaced once. It is NOT NULL for
+ * a database created here; a database written before ticket 03 has it added as a
+ * nullable column, and null there means "the line code falls back to" — see
+ * `StoredDrop.reply`.
+ *
  * `item_.drop_id` cascades. Deleting a drop takes its items with it; ticket 09
  * relies on this to leave no orphan rows behind.
  */
@@ -43,7 +48,8 @@ CREATE TABLE IF NOT EXISTS drop_ (
   id         TEXT PRIMARY KEY,
   body       TEXT NOT NULL,
   dropped_at TEXT NOT NULL,
-  input_type TEXT
+  input_type TEXT,
+  reply      TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS item_ (
@@ -63,6 +69,7 @@ interface DropRow {
   readonly body: string;
   readonly dropped_at: string;
   readonly input_type: string | null;
+  readonly reply: string | null;
 }
 
 /** An item row as SQLite hands it back. */
@@ -91,6 +98,7 @@ function toStoredDrop(row: DropRow): StoredDrop {
     body: row.body,
     droppedAt: row.dropped_at,
     inputType: readInputType(row.input_type),
+    reply: row.reply,
   };
 }
 
@@ -141,15 +149,18 @@ export function openSqliteStore(file: string): DropStore {
   // Bring a database written by ticket 01 up to date. `SCHEMA` above cannot do
   // it: `CREATE TABLE IF NOT EXISTS` leaves an existing table alone.
   ensureColumn(db, 'drop_', 'input_type', 'TEXT');
+  // Ticket 03's column, for a file written by tickets 01 or 02.
+  ensureColumn(db, 'drop_', 'reply', 'TEXT');
 
-  const insertDrop = db.prepare('INSERT INTO drop_ (id, body, dropped_at) VALUES (?, ?, ?)');
+  const insertDrop = db.prepare('INSERT INTO drop_ (id, body, dropped_at, reply) VALUES (?, ?, ?, ?)');
   const selectDrops = db.prepare(
-    'SELECT id, body, dropped_at, input_type FROM drop_ ORDER BY dropped_at ASC, rowid ASC',
+    'SELECT id, body, dropped_at, input_type, reply FROM drop_ ORDER BY dropped_at ASC, rowid ASC',
   );
   const selectDrop = db.prepare(
-    'SELECT id, body, dropped_at, input_type FROM drop_ WHERE id = ?',
+    'SELECT id, body, dropped_at, input_type, reply FROM drop_ WHERE id = ?',
   );
   const setInputType = db.prepare('UPDATE drop_ SET input_type = ? WHERE id = ?');
+  const setReply = db.prepare('UPDATE drop_ SET reply = ? WHERE id = ?');
   const deleteItemsForDrop = db.prepare('DELETE FROM item_ WHERE drop_id = ?');
   const insertItem = db.prepare(
     'INSERT INTO item_ (id, drop_id, text, due_at, caught_at) VALUES (?, ?, ?, ?, ?)',
@@ -162,15 +173,20 @@ export function openSqliteStore(file: string): DropStore {
   );
 
   return {
-    async appendDrop(body: string): Promise<StoredDrop> {
+    async appendDrop(body: string, reply: string): Promise<StoredDrop> {
       const stored: StoredDrop = {
         id: randomUUID(),
         body,
         droppedAt: new Date().toISOString(),
         inputType: null,
+        reply,
       };
-      insertDrop.run(stored.id, stored.body, stored.droppedAt);
+      insertDrop.run(stored.id, stored.body, stored.droppedAt, reply);
       return stored;
+    },
+
+    async recordReply(dropId: string, reply: string): Promise<void> {
+      setReply.run(reply, dropId);
     },
 
     async recordExtraction(dropId: string, outcome: ExtractOutcome): Promise<void> {

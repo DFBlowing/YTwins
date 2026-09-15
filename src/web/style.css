@@ -163,6 +163,16 @@ body {
   color: var(--ink-soft);
 }
 
+/* What the product said back to this drop. Set apart from the user's own words
+   and from the time, because it is the only line on the page the product
+   wrote — and typed smaller than the user's text, which is the one that
+   matters. */
+.drop-reply {
+  margin: 0.5rem 0 0;
+  font-size: 0.9rem;
+  color: var(--accent);
+}
+
 /* What this drop caught. Indented so the items read as belonging to the drop
    above them rather than as separate top-level entries. */
 .item-list {

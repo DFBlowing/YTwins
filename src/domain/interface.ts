@@ -54,7 +54,15 @@ export interface DropResult {
    * so that later recall shows the user their own words.
    */
   readonly body: string;
-  /** The line the user sees. Always present: dropping something is never silent. */
+  /**
+   * The line the user sees. Always present: dropping something is never silent.
+   *
+   * The drop is answered before the provider is consulted, so what comes back
+   * here is the line code itself can vouch for. Ticket 03 gives the styled one
+   * its way in afterwards, and it replaces this one **only** if it passes the
+   * parent-voice checks — read the drop back (see `getDrop`) to see which line
+   * the drop ended up with.
+   */
   readonly reply: string;
   /**
    * Stable identity of the drop that was just recorded.
@@ -96,6 +104,15 @@ export interface DropSummary {
    * whether the work is done, never what the drop was judged to be.
    */
   readonly extracted: boolean;
+  /**
+   * The line this drop answers with, as it stands now.
+   *
+   * Rendered as the drop's own line rather than a page-level "last reply", so
+   * that a refresh shows exactly what was said the first time. It starts as the
+   * line code can vouch for and is replaced by the provider's once — and only
+   * once — that line has passed the parent-voice checks.
+   */
+  readonly reply: string;
 }
 
 /**

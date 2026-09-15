@@ -9,7 +9,10 @@
  * This is a test double, but it lives beside the domain rather than inside the
  * test file because later tickets drive their tests through it too. Ticket 02
  * widened it from one operation to two: a drop is both answered and read.
- * Ticket 07 adds the two ends of recall, scripted the same way.
+ * Ticket 07 adds the two ends of recall, scripted the same way. Ticket 03 makes
+ * answering scriptable **per attempt**, which is what lets a test walk the
+ * "check → regenerate once → degrade" path, and offers the reply that
+ * deliberately breaks the rules as a script of its own.
  *
  * @module domain/fake-provider
  */
@@ -18,6 +21,7 @@ import type {
   AiProvider,
   ComposeAnswerRequest,
   ComposeAnswerResult,
+  ExtractRequest,
   ExtractResult,
   ParseQuestionRequest,
   ParseQuestionResult,
@@ -49,6 +53,21 @@ export type FailureScript =
 /** What the fake should do for one input, when answering. */
 export type RespondScript = FailureScript | { readonly kind: 'reply'; readonly reply: string };
 
+/**
+ * A reply that deliberately breaks the parent-voice rules.
+ *
+ * Offered as a script rather than kept inside one test because walking the
+ * "check → regenerate once → degrade" path is a promise of the product, not a
+ * quirk of one check: the fake has to be able to hand the domain a reply that
+ * must never reach the user, and this is it. It breaks several rules at once on
+ * purpose — it asks why, uses a pet name, tells the user how to feel, and undoes
+ * itself with a contrast — because the point is that no part of it is shown.
+ */
+export const REPLY_THAT_BREAKS_THE_RULES: RespondScript = {
+  kind: 'reply',
+  reply: '你为什么这么想？宝贝，别想那么多，不过你至少试过了。',
+};
+
 /** What the fake should read out of one input. */
 export interface ExtractReading {
   readonly inputType: InputType;
@@ -73,6 +92,23 @@ export type AnyScript = RespondScript | ExtractScript | ParseQuestionScript | Co
 export interface FakeProviderScript {
   readonly fallback?: RespondScript;
   readonly byBody?: Readonly<Record<string, RespondScript>>;
+  /**
+   * What to answer on the first, second, … attempt for one body.
+   *
+   * The last entry repeats, so a script can say "always this" with one element
+   * and "this, then that" with two. Needed because the domain asks a second time
+   * when the first reply breaks the rules, and a fake that answered the same
+   * thing twice could not tell the two paths apart.
+   */
+  readonly respondAttempts?: Readonly<Record<string, readonly RespondScript[]>>;
+  /**
+   * Observe each answer as it is asked for.
+   *
+   * A callback rather than a log, for the same reason as `onCompose`: what a
+   * test needs is what the provider was told — the situation, the rules, what
+   * the last attempt broke — and those only exist per call.
+   */
+  readonly onRespond?: (request: RespondRequest) => void;
   /** What to read out of a drop. Omitting it means every drop reads as empty. */
   readonly extractFallback?: ExtractScript;
   readonly extractByBody?: Readonly<Record<string, ExtractScript>>;
@@ -100,7 +136,6 @@ export interface FakeProvider extends AiProvider {
   /** Every question the domain asked it to parse, in order. */
   readonly askedQuestions: readonly string[];
 }
-
 /**
  * What an unscripted drop reads as.
  *
@@ -135,11 +170,13 @@ function isFailure(script: AnyScript): script is FailureScript {
   return script.kind === 'hang' || script.kind === 'fail' || script.kind === 'throw';
 }
 
-function runRespond(script: RespondScript | undefined, body: string): Promise<RespondResult> {
+function runRespond(script: RespondScript | undefined): Promise<RespondResult> {
   if (script === undefined) {
-    // Unscripted input still gets an answer: the fake's job is to be
-    // deterministic, not to model every real-world case.
-    return Promise.resolve({ reply: `接住了：${body}` });
+    // Unscripted input still gets an answer, and it is the plain acknowledgement
+    // rather than an echo of the drop: an echo grows past the reply's length
+    // limit on a long fragment, so the fake's own default would break a rule
+    // every real reply has to keep.
+    return Promise.resolve({ reply: '接住了。' });
   }
   if (isFailure(script)) return fail(script);
   return Promise.resolve({ reply: script.reply });
@@ -190,6 +227,8 @@ export function createFakeProvider(script: FakeProviderScript = {}): FakeProvide
   const seen: string[] = [];
   const read: string[] = [];
   const askedQuestions: string[] = [];
+  /** How many times each body has been answered, which picks its attempt script. */
+  const answered = new Map<string, number>();
   return {
     seen,
     read,
@@ -200,9 +239,19 @@ export function createFakeProvider(script: FakeProviderScript = {}): FakeProvide
     // `provider.respond(...).catch(...)` in the caller would not survive.
     respond(request: RespondRequest): Promise<RespondResult> {
       seen.push(request.body);
-      return runRespond(script.byBody?.[request.body] ?? script.fallback, request.body);
+      script.onRespond?.(request);
+
+      const previous = answered.get(request.body) ?? 0;
+      answered.set(request.body, previous + 1);
+      const attempts = script.respondAttempts?.[request.body];
+      // The last entry repeats, so "always this" is a one-element script.
+      const scripted =
+        attempts === undefined
+          ? undefined
+          : attempts[Math.min(previous, attempts.length - 1)];
+      return runRespond(scripted ?? script.byBody?.[request.body] ?? script.fallback);
     },
-    extract(request: RespondRequest): Promise<ExtractResult> {
+    extract(request: ExtractRequest): Promise<ExtractResult> {
       read.push(request.body);
       return runExtract(script.extractByBody?.[request.body] ?? script.extractFallback);
     },

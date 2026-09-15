@@ -5,8 +5,11 @@
  * that real and fake implementations are interchangeable and the domain's tests
  * are fully deterministic. Ticket 01 needed only `respond`; ticket 02 adds
  * `extract`, which is what turns a drop into **items** and a **record**.
- * Ticket 07 adds the two ends of **recall** — parsing a question, and composing
- * its answer. Embeddings and link judging arrive with their own tickets.
+ * Ticket 03 gives `respond` the **situation** it is answering and the
+ * parent-voice rules, and has the domain check what comes back rather than
+ * trusting it. Ticket 07 adds the two ends of **recall** — parsing a question,
+ * and composing its answer. Embeddings and link judging arrive with their own
+ * tickets.
  *
  * Note what recall does *not* put here: choosing which records answer a
  * question. That selection is ordinary code inside the domain, so "found
@@ -25,12 +28,61 @@ import type { InputType, RecallSource } from './interface.ts';
 export interface RespondRequest {
   /** The drop's original text. */
   readonly body: string;
+  /**
+   * What the drop asks of the reply, as ordinary code read it.
+   *
+   * Judgement is not delegated here: the flags are mechanical readings of the
+   * text, and what they *imply* for the wording is the instruction's to spell
+   * out. They travel because an instruction the provider cannot see the
+   * situation for is a rule it cannot obey.
+   */
+  readonly situation: ReplySituation;
+  /**
+   * The rules this reply must obey, in the product's own words.
+   *
+   * They are sent rather than left to the implementation because they are a
+   * hard product constraint rather than a prompt-tuning choice: an
+   * implementation puts them in its instructions, and the domain's own code
+   * checks the same rules afterwards (`parent-voice.ts`). Two places, one list.
+   */
+  readonly instructions: readonly string[];
+  /**
+   * Which rules the previous attempt broke, when this is the one regeneration.
+   *
+   * Absent on a first attempt. A retry that was not told what was wrong is a
+   * reroll, and a model asked to try again at random is no likelier to succeed.
+   */
+  readonly violations?: readonly string[];
+}
+
+/**
+ * What a drop asks of its reply, as ordinary code read it out of the text.
+ *
+ * Deliberately three booleans and nothing else. Each is a reading, not a
+ * judgement: whether the text names a feeling, whether the user asked to stop,
+ * whether the user asked what to do. The provider is told them so it can obey
+ * the instructions; the domain uses the same readings to check what comes back
+ * and to pick the line it falls back to.
+ */
+export interface ReplySituation {
+  /** The text carries a feeling, so the reply's first sentence must name one. */
+  readonly emotionPresent: boolean;
+  /** The user said they do not want to talk, so the reply stops asking. */
+  readonly stopRequested: boolean;
+  /** The user asked what to do, so advice is licensed this turn. */
+  readonly adviceRequested: boolean;
 }
 
 /** The provider's answer to one drop. */
 export interface RespondResult {
   /** The reply text. The domain validates it against the parent-voice rules. */
   readonly reply: string;
+}
+
+/** A drop the provider is asked to read. */
+export interface ExtractRequest {
+  /** The drop's original text. */
+  readonly body: string;
 }
 
 /**
@@ -132,9 +184,12 @@ export interface AiProvider {
    * Compose the reply to one drop.
    *
    * Implementations may throw or take their time; the domain treats both as
-   * ordinary, because a drop succeeds whether or not the provider answers.
+   * ordinary, because a drop succeeds whether or not the provider answers. What
+   * they may **not** do is decide how long a reply is or whether it asks a
+   * question: those are checked afterwards, and a reply that breaks them is
+   * thrown away and asked for once more.
    *
-   * @param request - the drop being answered.
+   * @param request - the drop, the situation it presents, and the rules.
    * @returns the reply text.
    */
   respond(request: RespondRequest): Promise<RespondResult>;
@@ -150,7 +205,7 @@ export interface AiProvider {
    * @param request - the drop being read.
    * @returns the items it contains, and what kind of input it was.
    */
-  extract(request: RespondRequest): Promise<ExtractResult>;
+  extract(request: ExtractRequest): Promise<ExtractResult>;
 
   /**
    * Work out what to look for when the user asks about their records.

@@ -21,6 +21,12 @@
  * its **source**. The two travel together because the whole promise of asking is
  * that the user can check the answer against their own words — and when nothing
  * covers the question, the page says so rather than showing something plausible.
+ *
+ * What the reply is, after ticket 03: the drop is answered the moment it is
+ * caught, with a line code itself vouches for, and the styled line takes that
+ * place only once the parent-voice checks have passed it. The page therefore
+ * shows the drop's reply rather than the POST response alone — a reload has to
+ * show the same sentence, and the drop is where it is kept.
  */
 
 /** One item parsed out of a drop, as the server reports it. */
@@ -38,6 +44,8 @@ interface DropSummary {
   readonly droppedAt: string;
   readonly items: readonly Item[];
   readonly extracted: boolean;
+  /** The line this drop answered with — the product's smaller voice. */
+  readonly reply: string;
 }
 
 /** Where an answer came from, as the server reports it. */
@@ -121,6 +129,10 @@ function renderItem(item: Item): HTMLLIElement {
  * An unread drop says so rather than showing an empty list, because "nothing
  * has been read yet" and "there was nothing in it" are different facts and
  * showing the first as the second would be a quiet lie.
+ *
+ * The drop's **reply** is shown with it rather than only in the line above the
+ * form: it belongs to that drop, so a reload shows what was said the first time
+ * instead of an empty screen where the answer used to be.
  */
 function renderDrop(drop: DropSummary): HTMLLIElement {
   const item = document.createElement('li');
@@ -135,7 +147,11 @@ function renderDrop(drop: DropSummary): HTMLLIElement {
   when.dateTime = drop.droppedAt;
   when.textContent = new Date(drop.droppedAt).toLocaleString('zh-CN');
 
-  item.append(body, when);
+  const reply = document.createElement('p');
+  reply.className = 'drop-reply';
+  reply.textContent = drop.reply;
+
+  item.append(body, when, reply);
 
   if (drop.extracted) {
     if (drop.items.length > 0) {
@@ -182,15 +198,25 @@ async function loadDrop(dropId: string): Promise<DropSummary | null> {
  * The wait is bounded: a provider that never answers must leave the page
  * showing an honest "not read yet" rather than spinning forever. Giving up is
  * not a failure — the drop is already safely stored, and a refresh looks again.
+ *
+ * The drop's styled **reply** is composed behind it, on its own schedule, so
+ * what is returned here is the drop as it stood when the wait ended. The page
+ * takes whichever line the drop has, which is never nothing: the line code can
+ * vouch for is written when the drop is caught.
+ *
+ * @returns the drop as last read, or null when the server could not answer.
  */
-async function settleDrop(dropId: string): Promise<void> {
+async function settleDrop(dropId: string): Promise<DropSummary | null> {
+  let latest: DropSummary | null = null;
   for (let attempt = 0; attempt < POLL_ATTEMPTS; attempt += 1) {
     const drop = await loadDrop(dropId);
-    if (drop === null) return;
+    if (drop === null) break;
+    latest = drop;
     if (drop.extracted) break;
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
   await loadDrops();
+  return latest;
 }
 
 /** Format a moment as a value a `datetime-local` input accepts (local time). */
@@ -300,9 +326,12 @@ form.addEventListener('submit', (event) => {
       input.value = '';
 
       // The drop is already caught at this point. What is still running is
-      // reading it, so the list is refreshed once that has had its chance.
+      // reading it and wording the reply, so the list is refreshed once that
+      // has had its chance — and the line above the form is replaced by the
+      // one the drop actually settled on.
       await loadDrops();
-      await settleDrop(payload.id);
+      const settled = await settleDrop(payload.id);
+      if (settled !== null) reply.textContent = settled.reply;
     } catch {
       reply.textContent = '连不上本地服务。';
     } finally {

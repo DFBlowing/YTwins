@@ -25,6 +25,15 @@ export interface StoredDrop {
    * also what makes extraction re-runnable: the store can tell the two apart.
    */
   readonly inputType: InputType | null;
+  /**
+   * The line the user is answered with, or null for a drop recorded before this
+   * column existed. Null is not "no reply": the domain falls back to the line
+   * code can vouch for, because a drop is never silent.
+   *
+   * The value changes once: it is written when the drop is caught, and replaced
+   * if and only if the provider returns a reply that passes the checks.
+   */
+  readonly reply: string | null;
 }
 
 /** One stored item, as the store keeps it. */
@@ -61,8 +70,30 @@ export interface ExtractOutcome {
  * reads both back. Later tickets widen this port as they add entities.
  */
 export interface DropStore {
-  /** Record one drop verbatim and return what was stored. */
-  appendDrop(body: string): Promise<StoredDrop>;
+  /**
+   * Record one drop verbatim and return what was stored.
+   *
+   * The reply is written with it, in the same step: dropping something is never
+   * silent, so the line the user is owed exists from the moment the drop does —
+   * before any provider has been asked anything. A better line may replace it
+   * later (see `recordReply`); an absent one may not.
+   *
+   * @param body - the user's text, stored byte-for-byte.
+   * @param reply - the line the drop is answered with.
+   */
+  appendDrop(body: string, reply: string): Promise<StoredDrop>;
+
+  /**
+   * Replace a drop's reply with the checked one the provider composed.
+   *
+   * Called at most once per drop. It is a separate step from `appendDrop`
+   * because the two lines have different guarantees: the first is code's own and
+   * always exists, the second is a model's and arrives only if it passes.
+   *
+   * @param dropId - the drop being answered.
+   * @param reply - the line to show instead.
+   */
+  recordReply(dropId: string, reply: string): Promise<void>;
 
   /**
    * Record what was read out of a drop.

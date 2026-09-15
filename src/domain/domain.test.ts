@@ -25,7 +25,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { createDomain } from './core.ts';
-import { createFakeProvider } from './fake-provider.ts';
+import type { RespondRequest } from './ai-provider.ts';
+import { REPLY_THAT_BREAKS_THE_RULES, createFakeProvider } from './fake-provider.ts';
 import { openSqliteStore } from './sqlite-store.ts';
 
 let failures = 0;
@@ -206,15 +207,17 @@ await check('the reply never waits on the provider, even one that answers instan
     const store = openSqliteStore(file);
     try {
       // A blank acknowledgement would pass a `length > 0` check by accident, so
-      // assert the exact text instead: the styled answer is ticket 03's to
-      // surface, and today's contract is that it does NOT appear here. This is
-      // what makes the "not waiting" claim falsifiable rather than decorative.
+      // name the exact line the provider offered. Ticket 03 gave the drop a line
+      // code itself can vouch for the moment it is caught, and made the styled
+      // one replace it only after it has been checked — so the styled line not
+      // being here is what keeps the "not waiting" claim falsifiable.
       const provider = createFakeProvider({
         fallback: { kind: 'reply', reply: '听起来今天挺累的。' },
       });
       const result = await createDomain({ store, provider }).drop(MIXED_DROP);
 
-      assert.equal(result.reply, '接住了。', 'the drop returned before the provider could answer');
+      assert.notEqual(result.reply, '听起来今天挺累的。', 'the drop returned before the provider answered');
+      assert.ok(result.reply.trim().length > 0, 'and the user was answered anyway');
     } finally {
       await store.close();
     }
@@ -343,10 +346,11 @@ await check('the input type is recorded internally and never asked of the user',
       assert.equal(drop?.extracted, true, 'the type was recorded behind the interface');
 
       // And the interface hands the user no way to see or choose it: the whole
-      // drop summary carries the text, the time, the items and nothing else.
+      // drop summary carries the text, the time, the items, the line it answers
+      // with, and nothing else.
       assert.deepEqual(
         Object.keys(drop ?? {}).sort(),
-        ['body', 'droppedAt', 'extracted', 'id', 'items'],
+        ['body', 'droppedAt', 'extracted', 'id', 'items', 'reply'],
         'no classification field is exposed to the page',
       );
     } finally {
@@ -935,6 +939,298 @@ await check('the recalled source is the drop the match hit, not merely the newes
       );
     } finally {
       await store.close();
+    }
+  });
+});
+
+console.log('\ndomain core — the reply');
+
+/**
+ * A drop with no emotion cue, no stop request and no question in it.
+ *
+ * The whole point of the reply rules is what they do to ordinary input, so the
+ * cases below are driven from fragments that carry nothing special.
+ */
+const PLAIN_DROP = '明天下午三点开会';
+
+// The emotional drop is `MIXED_DROP` (好烦) from the top of this file — the same
+// fragment act one of the demo drops.
+
+/** A drop that asks the user to stop, in the doc's own words. */
+const STOP_DROP = '算了，不想说了';
+
+/** A drop that explicitly asks what to do — the one licence to advise. */
+const ADVICE_DROP = '这件事我该怎么办';
+
+/** A line that obeys every mechanical rule, so nothing about it needs fixing. */
+const GOOD_REPLY = '听起来今天挺累的。';
+
+/**
+ * The lines code itself can vouch for, one per situation.
+ *
+ * Written out rather than read from the domain, because these are the literals
+ * the user is promised: if code ever started emitting something else, these
+ * checks have to notice.
+ */
+const SAFE_EMOTION_REPLY = '听着今天不太好受。';
+const SAFE_PRESENCE_REPLY = '嗯，我在。想说了再说。';
+const SAFE_RECORDED_REPLY = '接住了。';
+
+/**
+ * Replies that each break exactly one mechanical rule.
+ *
+ * Asserted one at a time rather than all at once, so a rule that stopped firing
+ * cannot hide behind another that still does.
+ */
+const RULE_BREAKERS: readonly { readonly why: string; readonly reply: string }[] = [
+  { why: 'a question that asks why', reply: '你为什么这么想？' },
+  { why: 'a second question', reply: '是这样吗？还是那样？' },
+  { why: 'a word that judges the user', reply: '别想那么多。' },
+  { why: 'a pet name', reply: '亲爱的，我记下了。' },
+  { why: 'a contrast ending', reply: '我记下了，不过你也别太累。' },
+  { why: 'an order', reply: '你应该早点睡。' },
+  {
+    why: 'four sentences',
+    reply: '第一件事是这样。第二件事是那样。第三件事还有别的。第四件事也有。',
+  },
+  {
+    why: 'more than sixty characters',
+    reply:
+      '今天的事情是这样的一件接着一件地来，先是要交提纲，然后是小组讨论，接着还有一份报告要写，最后还有一次课堂展示要准备，另外还要把英语单词背一遍。',
+  },
+  { why: 'no Chinese in it at all', reply: 'Got it, noted down.' },
+];
+
+await check('an emotional drop is answered at once, and the styled line takes that place', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = createFakeProvider({ fallback: { kind: 'reply', reply: GOOD_REPLY } });
+      const domain = createDomain({ store, provider });
+      const dropped = await domain.drop(MIXED_DROP);
+
+      assert.equal(
+        dropped.reply,
+        SAFE_EMOTION_REPLY,
+        'a drop carrying a feeling is answered with one before the provider is even asked',
+      );
+
+      await settledUntil(async () => (await domain.getDrop(dropped.id))?.reply === GOOD_REPLY);
+      assert.equal(
+        (await domain.getDrop(dropped.id))?.reply,
+        GOOD_REPLY,
+        'the checked line replaced the one code could vouch for',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a plain drop is answered with a record confirmation, not an emotion reply', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      // The provider is down, so what is left is the line code chose by itself.
+      const provider = createFakeProvider({
+        fallback: { kind: 'fail', reason: 'cloud LLM unreachable' },
+      });
+      const domain = createDomain({ store, provider });
+      const dropped = await domain.drop(PLAIN_DROP);
+
+      assert.equal(dropped.reply, SAFE_RECORDED_REPLY, 'nothing in this drop was turned into a feeling');
+      assert.equal(
+        (await domain.getDrop(dropped.id))?.reply,
+        SAFE_RECORDED_REPLY,
+        'and the drop keeps that line rather than inventing an emotion for it',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('the rules and the situation travel to the provider', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const requests: RespondRequest[] = [];
+      const provider = createFakeProvider({
+        fallback: { kind: 'reply', reply: GOOD_REPLY },
+        onRespond: (request) => requests.push(request),
+      });
+      const domain = createDomain({ store, provider });
+      await domain.drop(MIXED_DROP);
+      await domain.drop(PLAIN_DROP);
+      await domain.drop(STOP_DROP);
+      await domain.drop(ADVICE_DROP);
+      await settledUntil(async () => requests.length >= 4);
+
+      const [emotional, plain, stopping, asking] = requests;
+      assert.equal(emotional?.situation.emotionPresent, true, 'the feeling in this drop was named');
+      assert.equal(plain?.situation.emotionPresent, false, 'and a plain one was not turned into one');
+      assert.equal(stopping?.situation.stopRequested, true, 'the request to stop was passed on');
+      assert.equal(asking?.situation.adviceRequested, true, 'the explicit question was passed on');
+      assert.equal(plain?.situation.adviceRequested, false, 'and a plain one is not licensed to advise');
+      assert.ok(
+        (emotional?.instructions.length ?? 0) > 0,
+        'the rules themselves travel with every request',
+      );
+      assert.equal(
+        emotional?.violations,
+        undefined,
+        'the first attempt has nothing to answer for',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a rule-breaking reply never reaches the user, and is regenerated exactly once', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = createFakeProvider({
+        respondAttempts: {
+          [MIXED_DROP]: [REPLY_THAT_BREAKS_THE_RULES, REPLY_THAT_BREAKS_THE_RULES],
+        },
+      });
+      const domain = createDomain({ store, provider });
+      const dropped = await domain.drop(MIXED_DROP);
+      await settledUntil(async () => provider.seen.length >= 2);
+
+      assert.equal(provider.seen.length, 2, 'the second failure must not become a third attempt');
+
+      const shown = (await domain.getDrop(dropped.id))?.reply ?? '';
+      assert.equal(shown, SAFE_EMOTION_REPLY, 'the safe line is what the user keeps');
+
+      // The safe line is asserted against the rules the user can read off it,
+      // as literals rather than by re-running the checker.
+      assert.ok(!shown.includes('为什么'), 'it does not ask the user why');
+      assert.ok(!shown.includes('宝贝'), 'it does not use a pet name');
+      assert.ok(!shown.includes('别想那么多'), 'it does not tell the user how to feel');
+      assert.ok(!/(但是|不过|至少)/.test(shown), 'it does not undo itself with a contrast');
+      assert.ok([...shown.replace(/\s/g, '')].length <= 60, 'it stays within the length limit');
+      assert.ok(shown.split(/(?<=[。！？])/u).filter((s) => s.trim().length > 0).length <= 3);
+      assert.ok(/[\u4e00-\u9fff]/u.test(shown), 'it is in Chinese');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a rule-breaking first attempt is retried, and the retry is told what was wrong', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const requests: RespondRequest[] = [];
+      const provider = createFakeProvider({
+        respondAttempts: {
+          [MIXED_DROP]: [REPLY_THAT_BREAKS_THE_RULES, { kind: 'reply', reply: GOOD_REPLY }],
+        },
+        onRespond: (request) => requests.push(request),
+      });
+      const domain = createDomain({ store, provider });
+      const dropped = await domain.drop(MIXED_DROP);
+
+      await settledUntil(async () => (await domain.getDrop(dropped.id))?.reply === GOOD_REPLY);
+      assert.equal(provider.seen.length, 2, 'one more attempt, and no more than one');
+      assert.ok((requests[1]?.violations?.length ?? 0) > 0, 'the retry was told which rules broke');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+for (const { why, reply } of RULE_BREAKERS) {
+  await check(`a reply with ${why} is refused`, async () => {
+    await withDatabase(async (file) => {
+      const store = openSqliteStore(file);
+      try {
+        const provider = createFakeProvider({ fallback: { kind: 'reply', reply } });
+        const domain = createDomain({ store, provider });
+        const dropped = await domain.drop(PLAIN_DROP);
+        await settledUntil(async () => provider.seen.length >= 2);
+
+        assert.equal(
+          (await domain.getDrop(dropped.id))?.reply,
+          SAFE_RECORDED_REPLY,
+          `the user was shown the line the provider offered: ${reply}`,
+        );
+      } finally {
+        await store.close();
+      }
+    });
+  });
+}
+
+await check('a reply that keeps asking after the user asked to stop is refused', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const requests: RespondRequest[] = [];
+      // One question: it would pass the "at most one question" rule, and only
+      // the stop request makes it wrong — which is what isolates this rule.
+      const provider = createFakeProvider({
+        fallback: { kind: 'reply', reply: '你想说说吗？' },
+        onRespond: (request) => requests.push(request),
+      });
+      const domain = createDomain({ store, provider });
+      const dropped = await domain.drop(STOP_DROP);
+      await settledUntil(async () => provider.seen.length >= 2);
+
+      assert.equal(dropped.reply, SAFE_PRESENCE_REPLY, 'only presence is left when the user steps back');
+      const shown = (await domain.getDrop(dropped.id))?.reply ?? '';
+      assert.equal(shown, SAFE_PRESENCE_REPLY);
+      assert.ok(!shown.includes('？'), 'the probing question never reached the user');
+      assert.equal(requests[0]?.situation.stopRequested, true);
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a provider that hangs or throws leaves a line that still obeys the rules', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const hanging = createFakeProvider({ fallback: { kind: 'hang' } });
+      const hung = await createDomain({ store, provider: hanging }).drop(MIXED_DROP);
+      assert.equal(
+        (await createDomain({ store }).getDrop(hung.id))?.reply,
+        SAFE_EMOTION_REPLY,
+        'a provider that never answers leaves the line code chose',
+      );
+      assert.equal(hanging.seen.length, 1, 'and is not asked a second time');
+
+      const throwing = createFakeProvider({ fallback: { kind: 'throw', reason: 'provider blew up' } });
+      const threw = await createDomain({ store, provider: throwing }).drop(MIXED_DROP);
+      assert.equal((await createDomain({ store }).getDrop(threw.id))?.reply, SAFE_EMOTION_REPLY);
+      assert.equal(throwing.seen.length, 1, 'a provider that cannot answer is not retried');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('the reply lands in the database, so a refresh shows the same line', async () => {
+  await withDatabase(async (file) => {
+    const first = openSqliteStore(file);
+    const provider = createFakeProvider({ fallback: { kind: 'reply', reply: GOOD_REPLY } });
+    const dropped = await createDomain({ store: first, provider }).drop(MIXED_DROP);
+    await settledUntil(async () => (await first.findDrop(dropped.id))?.reply === GOOD_REPLY);
+    await first.close();
+
+    const second = openSqliteStore(file);
+    try {
+      assert.equal(
+        (await createDomain({ store: second }).getDrop(dropped.id))?.reply,
+        GOOD_REPLY,
+        'the line is on disk, not in memory',
+      );
+    } finally {
+      await second.close();
     }
   });
 });

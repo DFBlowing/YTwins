@@ -21,10 +21,15 @@
  * what was kept, and being told both the answer and which drop it came from, is
  * the whole reason the original is stored verbatim rather than summarised.
  *
+ * Ticket 03 gives the drop its **reply**. It is the one place where the product
+ * speaks rather than listens, so it is where the parent-voice rules have to hold
+ * — and they are held twice over: the provider is told them, and the reply that
+ * comes back is checked against them before the user ever sees it.
+ *
  * @module domain/core
  */
 
-import type { AiProvider, ExtractResult } from './ai-provider.ts';
+import type { AiProvider, ExtractResult, ReplySituation } from './ai-provider.ts';
 import type {
   Domain,
   DropResult,
@@ -34,15 +39,11 @@ import type {
   RecallResult,
   RecallSource,
 } from './interface.ts';
+import { REPLY_INSTRUCTIONS, checkReply, readSituation, safeReply } from './parent-voice.ts';
 import type { DropStore, StoredDrop, StoredItem } from './storage.ts';
 
-/**
- * The reply used when no provider could answer.
- *
- * A drop must never be silent, and a provider failure must never surface as the
- * user's problem. This is the plain acknowledgement that the drop was caught.
- */
-const RECORDED_REPLY = '接住了。';
+/** How many times a provider is asked to answer one drop. One attempt, one retry. */
+const REPLY_ATTEMPTS = 2;
 
 /** What the core needs to run. */
 export interface DomainCoreOptions {
@@ -67,6 +68,9 @@ function toSummary(drop: StoredDrop, items: readonly StoredItem[]): DropSummary 
     // second column that could disagree with the first.
     extracted: drop.inputType !== null,
     items: items.map(toItem),
+    // A null reply is a row written before ticket 03, and the line code can
+    // vouch for is the honest answer for it: the drop is old, not unanswered.
+    reply: drop.reply ?? safeReply(readSituation(drop.body)),
   };
 }
 
@@ -137,11 +141,71 @@ export function createDomain(options: DomainCoreOptions): Domain {
     return toSummary(drop, await store.listItemsForDrop(dropId));
   }
 
+  /**
+   * Ask the provider for the drop's **reply**, and show it only if it passes.
+   *
+   * Never throws and never leaves the drop unanswered: the line code chose is
+   * already written when this runs, so every failure path here ends in "the user
+   * has been answered, just not in the provider's words".
+   *
+   * The rules are checked here rather than trusted to the provider, and the one
+   * retry is told which of them the first attempt broke — a model asked to try
+   * again with no information is being asked to guess luckily. A second failure
+   * is not a third attempt: the drop keeps the line that is known to be safe,
+   * which is the only way to promise the user never sees a violating one.
+   *
+   * @param drop - the drop just recorded.
+   * @param situation - what that drop asks of its reply.
+   */
+  async function replyInto(drop: StoredDrop, situation: ReplySituation): Promise<void> {
+    if (provider === undefined) return;
+
+    let violations: readonly string[] | undefined;
+    for (let attempt = 0; attempt < REPLY_ATTEMPTS; attempt += 1) {
+      let candidate: string;
+      try {
+        candidate = (
+          await provider.respond({
+            body: drop.body,
+            situation,
+            instructions: REPLY_INSTRUCTIONS,
+            ...(violations === undefined ? {} : { violations }),
+          })
+        ).reply;
+      } catch {
+        // Down, refusing, or blowing up. The safe line stands, and asking again
+        // would only spend a second call on a provider that cannot answer.
+        return;
+      }
+
+      const broken = checkReply(candidate, situation);
+      if (broken.length === 0) {
+        try {
+          await store.recordReply(drop.id, candidate);
+        } catch {
+          // The provider answered but the write failed. Swallowing this keeps
+          // the promise that answering never rejects, and leaves the safe line
+          // in place — which is a worse reply than the one just thrown away,
+          // but never a wrong one.
+        }
+        return;
+      }
+
+      violations = broken;
+    }
+  }
+
   return {
     async drop(body: string): Promise<DropResult> {
-      // Record first. The faithful original is what makes the drop a success,
-      // and it is the only thing the user is promised.
-      const stored = await store.appendDrop(body);
+      // What this drop asks of its reply, read once and used for two things:
+      // the line to answer with now, and what the provider is told later.
+      const situation = readSituation(body);
+      const safe = safeReply(situation);
+
+      // Record first, with the line the user is owed. The faithful original and
+      // an answer to it are what make the drop a success; both are code's own,
+      // and neither waits on anyone.
+      const stored = await store.appendDrop(body, safe);
 
       // Read the drop in the background. This is the decision the whole product
       // is shaped around: a drop returns in the time it takes to write one row,
@@ -160,20 +224,12 @@ export function createDomain(options: DomainCoreOptions): Domain {
       // exists, so it cannot race the store.
       void extractInto(stored);
 
-      // Compose the styled reply to what the user just said. Like extraction,
-      // it does not gate the drop: ticket 03 surfaces it by updating the drop
-      // once the provider answers, not by blocking this call. Until then the
-      // outcome is observed only so that no rejection goes unhandled.
-      if (provider !== undefined) {
-        Promise.resolve()
-          .then(() => provider.respond({ body }))
-          .catch(() => {
-            // Expected when the provider is down or refuses. The drop already
-            // succeeded, so there is nothing to report and nothing to undo.
-          });
-      }
+      // Compose the styled reply to what the user just said. Like extraction, it
+      // does not gate the drop: it replaces the line the drop was caught with,
+      // and only if it passes the parent-voice checks.
+      void replyInto(stored, situation);
 
-      return { body: stored.body, reply: RECORDED_REPLY, id: stored.id };
+      return { body: stored.body, reply: stored.reply ?? safe, id: stored.id };
     },
 
     async listDrops(): Promise<readonly DropSummary[]> {

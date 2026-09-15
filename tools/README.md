@@ -9,6 +9,14 @@
 |---|---|---|
 | [`check-workspace.mjs`](check-workspace.mjs) | 检查目录布局有没有违例（根目录杂物、`.scratch/` 里的非 tracker 目录、effort 目录里的杂物、`archive/` 里的大文件）。按需运行，不拦截任何操作 | `node tools/check-workspace.mjs` |
 
+**一次性的端到端验收脚本**（按 ticket 编号命名，验收完就留着当回归用；它们不属于上面的「长期工具」，
+但也没别的地方可放）：
+
+| 脚本 | 验什么 | 入口 |
+|---|---|---|
+| [`e2e-ticket-02.mjs`](e2e-ticket-02.mjs) | 真 HTTP：投递 → 事项/留档、待安排、输入类型不外泄、重启后仍在 | `node tools/e2e-ticket-02.mjs` |
+| [`e2e-ticket-03.mjs`](e2e-ticket-03.mjs) | 真 HTTP：落库那条回应 → 被校验过的替换、违规那句在任何响应里都取不到、停止追问、重启后同样 | `node tools/e2e-ticket-03.mjs` |
+
 ## 约定
 
 - 单文件工具直接放 `tools/` 根；多文件工具各自一个目录，目录里带 `README.md`。
