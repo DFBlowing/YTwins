@@ -163,6 +163,50 @@ body {
   color: var(--ink-soft);
 }
 
+/* What this drop caught. Indented so the items read as belonging to the drop
+   above them rather than as separate top-level entries. */
+.item-list {
+  margin: 0.6rem 0 0;
+  padding: 0 0 0 0.9rem;
+  list-style: none;
+  border-left: 2px solid var(--line);
+}
+
+.item-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.2rem 0;
+}
+
+.item-row + .item-row {
+  margin-top: 0.15rem;
+}
+
+.item-text {
+  word-break: break-word;
+}
+
+.item-due {
+  flex: none;
+  font-size: 0.8rem;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+/* An unscheduled item is a normal outcome, not a warning: it is toned down
+   rather than coloured, because nothing went wrong. */
+.item-due-none {
+  color: var(--ink-soft);
+}
+
+.item-pending {
+  margin: 0.6rem 0 0;
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+}
+
 .empty,
 .not-yet {
   color: var(--ink-soft);

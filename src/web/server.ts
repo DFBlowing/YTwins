@@ -116,7 +116,10 @@ export function createHandler(domain: Domain) {
           return;
         }
         const result = await domain.drop(body);
-        sendJson(response, 200, { body: result.body, reply: result.reply });
+        // The id travels back because the items are not known yet: extraction
+        // is asynchronous to recording, so the page asks about this drop again
+        // rather than being made to wait for an answer that may never come.
+        sendJson(response, 200, { id: result.id, body: result.body, reply: result.reply });
       } catch (error) {
         sendJson(response, 500, {
           error: error instanceof Error ? error.message : '投递失败',
@@ -130,6 +133,38 @@ export function createHandler(domain: Domain) {
       try {
         const drops = await domain.listDrops();
         sendJson(response, 200, { drops });
+      } catch {
+        sendJson(response, 500, { error: '读取失败' });
+      }
+      return;
+    }
+
+    // One drop, with whatever has been read out of it so far. The page polls
+    // this after dropping, which is how it finds out what was caught without
+    // the drop itself having waited for extraction.
+    if (request.method === 'GET' && url.startsWith('/api/drops/')) {
+      try {
+        const dropId = decodeURIComponent(url.slice('/api/drops/'.length));
+        const drop = await domain.getDrop(dropId);
+        if (drop === null) {
+          sendJson(response, 404, { error: '没有这次投递' });
+          return;
+        }
+        sendJson(response, 200, { drop });
+      } catch {
+        sendJson(response, 500, { error: '读取失败' });
+      }
+      return;
+    }
+
+    // Every item caught so far, including the ones with no parsed time. The
+    // unscheduled ones are listed deliberately rather than filtered out here:
+    // deciding how to show them is the page's business, and silently dropping
+    // them at the API would be the one failure the product does not allow.
+    if (request.method === 'GET' && url === '/api/items') {
+      try {
+        const items = await domain.listItems();
+        sendJson(response, 200, { items });
       } catch {
         sendJson(response, 500, { error: '读取失败' });
       }
