@@ -219,6 +219,21 @@ export function createHandler(domain: Domain) {
       return;
     }
 
+    // The **portrait**, which is also the **conclusion chain**: the conclusions
+    // themselves, each with the terms that support it and how it stands to the
+    // one before it. Read-only by construction — there is no write endpoint
+    // here, because settling needs no participation from the user. The two
+    // things the user may do to a conclusion arrive with ticket 10.
+    if (request.method === 'GET' && url === '/api/conclusions') {
+      try {
+        const conclusions = await domain.listConclusions();
+        sendJson(response, 200, { conclusions });
+      } catch {
+        sendJson(response, 500, { error: '读取失败' });
+      }
+      return;
+    }
+
     if (request.method === 'GET') {
       const requested = resolveStaticFile(url);
       const file = requested ?? join(WEB_DIST, 'index.html');

@@ -218,6 +218,19 @@ const SAFE_EMOTION_REPLY = '听着今天不太好受。';
 const SAFE_RECORDED_REPLY = '接住了。';
 
 /**
+ * The line a **catch** falls back to.
+ *
+ * A catch is the substitute for a conclusion when there is too little material to
+ * claim anything, and it usually reuses the line the newest feeling was answered
+ * with (see `catchLine` in `core.ts`) — but a reply is allowed up to three
+ * sentences and one question, while a catch stands where a conclusion would and
+ * holds to a conclusion's shape. When the feeling's own line does not, this is
+ * the shortest true thing code can say instead: presence, and no claim about
+ * anything. Its only job is to not be a verdict.
+ */
+export const SAFE_CATCH_REPLY = '嗯，我在。';
+
+/**
  * The rules, in the product's own words, for the provider's instructions.
  *
  * Sent with every request rather than left to each implementation, so the hard

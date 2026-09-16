@@ -36,6 +36,15 @@
  * one the product invented. The hard edges are on screen as soon as a drop has
  * been read; the semantic ones follow within the moment the page gives them
  * (`LINK_GRACE_POLLS`), and a refresh shows everything that was decided later.
+ *
+ * What act one shows after ticket 05: the **portrait** — the conclusions the
+ * accumulation settled into — with the terms behind each one and where it sits
+ * in the **conclusion chain**. It is the same read as the links and gets the
+ * same moment, because settling is a third job behind the reading and its timing
+ * is deliberately invisible: a look deferred to the quiet window takes minutes,
+ * so its sentence appears on a later load rather than in this one. There is
+ * nothing here for the user to press: settling needs no participation, which is
+ * the whole point of the feature.
  */
 
 /** One item parsed out of a drop, as the server reports it. */
@@ -100,6 +109,40 @@ interface RecallSource {
   readonly body: string;
   readonly droppedAt: string;
 }
+/** One term, as the server names it: enough to show, no more. */
+interface NamedTerm {
+  readonly id: string;
+  readonly text: string;
+}
+
+/** A conclusion named well enough to point at another one. */
+interface ConclusionRef {
+  readonly id: string;
+  readonly text: string;
+}
+
+/**
+ * One thing the product worked out on its own, as the server reports it.
+ *
+ * The three numbers beside the sentence are the ones its wording was read off,
+ * and they travel to the page on purpose: the product should be able to say why
+ * it spoke the way it did, and a number the user can read is what makes that an
+ * answer rather than a reassurance.
+ */
+interface Conclusion {
+  readonly id: string;
+  readonly text: string;
+  readonly kind: 'claim' | 'catch';
+  readonly tier: 'weak' | 'medium' | 'strong' | null;
+  readonly relation: 'first' | 'inherit' | 'overturn';
+  readonly supersedes: ConclusionRef | null;
+  readonly supersededBy: ConclusionRef | null;
+  readonly createdAt: string;
+  readonly support: readonly NamedTerm[];
+  readonly mentions: number;
+  readonly spanDays: number;
+  readonly averageStrength: number;
+}
 
 /**
  * The outcome of asking a question.
@@ -128,6 +171,8 @@ const list = mustFind<HTMLUListElement>('#drop-list');
 const empty = mustFind<HTMLParagraphElement>('#drop-empty');
 const linkList = mustFind<HTMLUListElement>('#link-list');
 const linkEmpty = mustFind<HTMLParagraphElement>('#link-empty');
+const conclusionList = mustFind<HTMLOListElement>('#conclusion-list');
+const conclusionEmpty = mustFind<HTMLParagraphElement>('#conclusion-empty');
 
 const askForm = mustFind<HTMLFormElement>('#ask-form');
 const askInput = mustFind<HTMLInputElement>('#ask-input');
@@ -164,6 +209,12 @@ const REPLY_GRACE_POLLS = 4;
  * similarity edge waits on an embedding call. Rather than guess at a delay, the
  * list is re-read a few times over the next second. A link decided after that
  * appears on the next load, and nothing on screen is ever a placeholder.
+ *
+ * The same rounds cover the **conclusions**, which are a third job behind the
+ * reading: a matter has to have been attached before settling can see it. A look
+ * that is deferred to the quiet window takes minutes, so its conclusion appears
+ * on a later load rather than here — which is honest, and the same read is what
+ * brings it back.
  */
 const LINK_GRACE_POLLS = 4;
 
@@ -331,16 +382,130 @@ async function loadLinks(): Promise<readonly TermLink[] | null> {
 }
 
 /**
- * Give the semantic half of linking its moment, then leave the list alone.
+ * Give the semantic half of linking — and the settling behind it — its moment.
  *
  * See `LINK_GRACE_POLLS`: the wait is bounded on purpose. Giving up is not a
- * failure — the links that are there are real, and the next load looks again.
+ * failure — what is there is real, and the next load looks again.
  */
-async function settleLinks(): Promise<void> {
+async function settleAccumulation(): Promise<void> {
   for (let attempt = 0; attempt < LINK_GRACE_POLLS; attempt += 1) {
     await loadLinks();
+    await loadConclusions();
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
+}
+
+/**
+ * How firmly the sentence was allowed to speak, in the words the page shows.
+ *
+ * A catch is not a weak claim: it is the substitute for one, so it says so
+ * rather than taking a band it never earned.
+ */
+function bandLabel(conclusion: Conclusion): string {
+  if (conclusion.kind === 'catch') return '承接';
+  if (conclusion.tier === 'strong') return '强档';
+  if (conclusion.tier === 'medium') return '中档';
+  return '弱档';
+}
+
+/**
+ * Why it said that, from the numbers it was read off.
+ *
+ * The sentence is a judgement, and the whole reason its wording was mapped from
+ * numbers instead of chosen by a model is so this answer can be given later.
+ * "被提起 N 次" is the threshold's unit; the span and the connection strength are
+ * what the band was read from.
+ */
+function whySpoken(conclusion: Conclusion): string {
+  const mentioned = `被提起 ${conclusion.mentions} 次`;
+  const terms = `${conclusion.support.length} 个词条`;
+  const spanned = `跨 ${conclusion.spanDays} 天`;
+  const tied = `平均连接 ${conclusion.averageStrength.toFixed(2)}`;
+  return `${mentioned} · ${terms} · ${spanned} · ${tied}`;
+}
+
+/**
+ * Render one conclusion, with what supports it and where it sits in the chain.
+ *
+ * The support terms are the user's own words, so the sentence can be checked
+ * against them — a judgement nobody can check is one they have to take on trust,
+ * and this product does not ask for that. The chain is shown as a sentence of
+ * its own ("承自…"), because "which of these came first" is part of what makes a
+ * portrait read as a history rather than as a list of verdicts.
+ */
+function renderConclusion(conclusion: Conclusion): HTMLLIElement {
+  const row = document.createElement('li');
+  row.className = `conclusion-row conclusion-${conclusion.kind}`;
+
+  const text = document.createElement('p');
+  text.className = 'conclusion-text';
+  text.textContent = conclusion.text;
+
+  const meta = document.createElement('p');
+  meta.className = 'conclusion-meta';
+
+  const band = document.createElement('span');
+  band.className = 'conclusion-band';
+  band.textContent = bandLabel(conclusion);
+
+  const when = document.createElement('time');
+  when.className = 'conclusion-when';
+  when.dateTime = conclusion.createdAt;
+  when.textContent = new Date(conclusion.createdAt).toLocaleString('zh-CN');
+
+  meta.append(band, when);
+
+  if (conclusion.supersedes !== null) {
+    const chain = document.createElement('span');
+    chain.className = 'conclusion-chain';
+    chain.textContent = `承自「${conclusion.supersedes.text}」`;
+    meta.append(chain);
+  }
+  if (conclusion.supersededBy !== null) {
+    const chain = document.createElement('span');
+    chain.className = 'conclusion-chain';
+    chain.textContent = `后来被「${conclusion.supersededBy.text}」接过`;
+    meta.append(chain);
+  }
+
+  const why = document.createElement('p');
+  why.className = 'conclusion-why';
+  why.textContent = `为什么这么说：${whySpoken(conclusion)}`;
+
+  row.append(text, meta, why);
+
+  if (conclusion.support.length > 0) {
+    const support = document.createElement('ul');
+    support.className = 'conclusion-support';
+    for (const term of conclusion.support) {
+      const chip = document.createElement('li');
+      chip.className = 'term-chip';
+      chip.textContent = term.text;
+      support.append(chip);
+    }
+    row.append(support);
+  }
+
+  return row;
+}
+
+/**
+ * Load the portrait — which is the conclusion chain.
+ *
+ * One read for both, because they are one thing: the portrait is the set of
+ * conclusions, and the chain is the relations between them. Nothing here is
+ * editable, and that is the shape of the feature rather than an omission —
+ * settling needs no participation from the user, so there is no step to keep.
+ *
+ * @returns the conclusions as last read, or null when the server could not answer.
+ */
+async function loadConclusions(): Promise<readonly Conclusion[] | null> {
+  const response = await fetch('/api/conclusions');
+  if (!response.ok) return null;
+  const payload = (await response.json()) as { conclusions: Conclusion[] };
+  conclusionList.replaceChildren(...payload.conclusions.map(renderConclusion));
+  conclusionEmpty.hidden = payload.conclusions.length > 0;
+  return payload.conclusions;
 }
 
 /** Ask about one drop, or null when the server cannot answer. */
@@ -500,10 +665,10 @@ form.addEventListener('submit', (event) => {
       const settled = await settleDrop(payload.id, payload.reply);
       if (settled !== null) reply.textContent = settled.reply;
 
-      // Terms arrive with the reading, and what they connect to is decided
-      // after it, so the links are read last — and given a moment, because the
-      // semantic half is still in flight when the reading lands.
-      await settleLinks();
+      // Terms arrive with the reading, and what they connect to — and what they
+      // add up to — is decided after it, so the accumulation is read last, with
+      // a moment for the work that is still in flight behind the reading.
+      await settleAccumulation();
     } catch {
       reply.textContent = '连不上本地服务。';
     } finally {
@@ -558,3 +723,4 @@ for (const tab of document.querySelectorAll<HTMLButtonElement>('.act-tab')) {
 
 void loadDrops();
 void loadLinks();
+void loadConclusions();

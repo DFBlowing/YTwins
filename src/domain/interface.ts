@@ -90,13 +90,22 @@ export type LinkKind = 'same-drop' | 'similar';
  */
 export const LINK_KINDS: readonly LinkKind[] = ['same-drop', 'similar'];
 
-/** One end of a link: enough to name the term, no more. */
-export interface LinkedTerm {
-  /** Identity of the term at this end. */
+/** One term, named well enough to show without a second lookup. */
+export interface NamedTerm {
+  /** Identity of the term. */
   readonly id: string;
   /** The user's own wording for it. */
   readonly text: string;
 }
+
+/**
+ * One end of a link: enough to name the term, no more.
+ *
+ * A `NamedTerm` by another name — the shape is shared rather than duplicated
+ * because a link's end and a conclusion's supporting term are the same fact, and
+ * two spellings of it would drift.
+ */
+export type LinkedTerm = NamedTerm;
 
 /**
  * Two terms that have been connected in the user's own material.
@@ -125,6 +134,108 @@ export interface TermLink {
   readonly from: LinkedTerm;
   /** The other end. */
   readonly to: LinkedTerm;
+}
+
+/**
+ * How firmly a conclusion may speak.
+ *
+ * Three bands rather than a free choice of tone, because the strength of the
+ * wording has to be answerable from numbers afterwards — see `conclusions.ts`.
+ * A band is read off how many terms support the conclusion, how long the matter
+ * has spanned and how tightly those terms connect to the feeling it is about.
+ * None of the three is the threshold: that decides whether it may speak at all.
+ */
+export type ConclusionTier = 'weak' | 'medium' | 'strong';
+
+/** Every band, so the store can read one back and refuse to invent one. */
+export const CONCLUSION_TIERS: readonly ConclusionTier[] = ['weak', 'medium', 'strong'];
+
+/**
+ * Whether a conclusion claims something, or only catches the newest feeling.
+ *
+ * A `catch` is what the product says when it has crossed the threshold but does
+ * not have enough material to say anything about a pattern: it names the feeling
+ * the newest fragment carried and claims nothing. It is the **substitute** for a
+ * conclusion, not a weaker one — which is why it carries no tier and no
+ * uncertain wording (there is nothing it is asserting).
+ */
+export type ConclusionKind = 'claim' | 'catch';
+
+/** Every kind, for the same reason as `CONCLUSION_TIERS`. */
+export const CONCLUSION_KINDS: readonly ConclusionKind[] = ['claim', 'catch'];
+
+/**
+ * How a conclusion stands to the one before it in the same matter.
+ *
+ * `first` opens the chain for that matter, `inherit` carries it on, and
+ * `overturn` is the user's own correction of the one before it (ticket 10 — the
+ * value is declared here because a store reading a relation it cannot name must
+ * not quietly drop the conclusion carrying it).
+ */
+export type ConclusionRelation = 'first' | 'inherit' | 'overturn';
+
+/** Every relation, for the same reason as `CONCLUSION_TIERS`. */
+export const CONCLUSION_RELATIONS: readonly ConclusionRelation[] = ['first', 'inherit', 'overturn'];
+
+/** A conclusion named well enough to point at another one. */
+export interface ConclusionRef {
+  /** Identity of the conclusion referred to. */
+  readonly id: string;
+  /** The sentence it said, so the reference reads on its own. */
+  readonly text: string;
+}
+
+/**
+ * One thing the product worked out about the user, in its own words.
+ *
+ * A conclusion is a **judgement**: it comes out of material the user never
+ * curated, so it is always stated with the uncertainty the evidence earns. It
+ * carries the terms that support it, because a judgement nobody can check
+ * against their own words is not one they can trust — and it carries the numbers
+ * its wording was read off, because "why did it say that then" has an answer.
+ */
+export interface Conclusion {
+  /** Stable identity of this conclusion. */
+  readonly id: string;
+  /** The sentence the user reads, frame included. */
+  readonly text: string;
+  /** Whether it claims something, or only catches the newest feeling. */
+  readonly kind: ConclusionKind;
+  /**
+   * The wording band the numbers earned, or null for a `catch`.
+   *
+   * Null is not "unknown": a catch asserts nothing, so there is no strength of
+   * assertion for it to be in.
+   */
+  readonly tier: ConclusionTier | null;
+  /** How it stands to the earlier conclusion for the same matter. */
+  readonly relation: ConclusionRelation;
+  /** The conclusion this one carries on from, or null when it opened the chain. */
+  readonly supersedes: ConclusionRef | null;
+  /**
+   * The conclusion that carries on from this one, or null while it is the latest.
+   *
+   * The other half of `supersedes`, and derived from it rather than stored:
+   * a conclusion does not know it will be revised, so nothing could write this
+   * at the time. It is what lets the chain be read forwards and backwards.
+   */
+  readonly supersededBy: ConclusionRef | null;
+  /** When it was assembled, as an ISO-8601 string. */
+  readonly createdAt: string;
+  /**
+   * The terms that support it, in the user's own words and in the order said.
+   *
+   * The whole accumulated set, not only what arrived since the last conclusion:
+   * what the sentence is about is the matter, and a support list that named only
+   * the newest fragments would show the user a smaller case than the one it made.
+   */
+  readonly support: readonly NamedTerm[];
+  /** How many times the matter had been raised when this was assembled. */
+  readonly mentions: number;
+  /** How many whole days the matter had spanned, as the bands are read. */
+  readonly spanDays: number;
+  /** How tightly its support connects to the feeling it is about, 0 to 1. */
+  readonly averageStrength: number;
 }
 
 /** What a drop caught, plus the line the user gets back. */
@@ -300,10 +411,12 @@ export interface RecallOptions {
  * Ticket 04 opened what the record accumulates into: a drop yields **terms**,
  * and terms grow **links** between them. Ticket 07 opens **recall**: asking a
  * question of those records and being told both the answer and which drop it
- * came from. The remaining operations named in the spec's interface (surfacing,
- * portrait, chain, scheduling, deletion) arrive with their own tickets — this
- * interface grows, it does not get pre-declared with stubs that would fake
- * behaviour.
+ * came from. Ticket 05 opens what the accumulation settles into: when a matter
+ * has been raised enough times, it becomes a **conclusion**, and the portrait is
+ * the set of those conclusions. The remaining operations named in the spec's
+ * interface (surfacing, scheduling, deletion, and what the user may do to a
+ * conclusion) arrive with their own tickets — this interface grows, it does not
+ * get pre-declared with stubs that would fake behaviour.
  */
 export interface Domain {
   /**
@@ -368,6 +481,24 @@ export interface Domain {
    * @returns every link, oldest first.
    */
   listLinks(): Promise<readonly TermLink[]>;
+
+  /**
+   * The **portrait**: every conclusion assembled so far, oldest first.
+   *
+   * The portrait is this list and nothing else — there is no second, hidden
+   * model of the user anywhere behind it. Each conclusion carries the terms that
+   * support it and how it stands to the one before it in its matter, which is
+   * also the **conclusion chain**: the relations between these conclusions are
+   * the chain, so reading it is reading this, not a second store.
+   *
+   * Read-only, and that is the shape of the product rather than an omission:
+   * settling needs no participation from the user, so there is no step here to
+   * maintain. The two things the user may do to a conclusion (mark it wrong, and
+   * add a sentence of their own) arrive with ticket 10.
+   *
+   * @returns every conclusion, oldest first.
+   */
+  listConclusions(): Promise<readonly Conclusion[]>;
 
   /**
    * Run extraction on a drop that has not been read yet, and report the outcome.

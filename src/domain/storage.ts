@@ -9,7 +9,13 @@
  * @module domain/storage
  */
 
-import type { InputType, LinkKind } from './interface.ts';
+import type {
+  ConclusionKind,
+  ConclusionRelation,
+  ConclusionTier,
+  InputType,
+  LinkKind,
+} from './interface.ts';
 
 /** One stored drop, as the store keeps it. */
 export interface StoredDrop {
@@ -25,6 +31,15 @@ export interface StoredDrop {
    * also what makes extraction re-runnable: the store can tell the two apart.
    */
   readonly inputType: InputType | null;
+  /**
+   * The term that carried the feeling or the decision this drop was about, or
+   * null when it carried neither.
+   *
+   * Kept on the drop because it is a reading of *this* drop: what a matter
+   * accumulates around is the feeling the user keeps returning to, and only the
+   * drop that said it knows which of its terms that was.
+   */
+  readonly anchorTermId: string | null;
   /**
    * The line the user is answered with, or null for a drop recorded before this
    * column existed. Null is not "no reply": the domain falls back to the line
@@ -107,6 +122,158 @@ export interface NewLink {
 }
 
 /**
+ * One drop that fed a matter, and the feeling it brought to it.
+ *
+ * Kept per drop rather than as a single count because two questions need the
+ * order: which feeling the matter last carried (the sentence follows the newest
+ * one), and which drop to quote when the matter may only catch a feeling rather
+ * than claim a pattern.
+ */
+export interface MatterDrop {
+  /** The drop that joined or opened the matter. */
+  readonly dropId: string;
+  /** The feeling or decision it brought, or null when it brought neither. */
+  readonly anchorTermId: string | null;
+  /** When it joined, as an ISO-8601 string. */
+  readonly at: string;
+}
+
+/**
+ * One **matter** as the store keeps it: the accumulation itself.
+ *
+ * "The same matter" is an inference the domain makes once, at the drop, and
+ * writes down here — like a link, and for the same reason: it is a reading of
+ * the material, not the material, and it must not silently re-run itself later
+ * under different values. Ticket 05's `ConclusionPolicy` therefore changes what
+ * happens *next*; what has already been attached stays attached.
+ *
+ * A matter is not part of the domain's interface. The user is shown the
+ * **portrait** — the conclusions — not the scaffolding they were assembled from.
+ */
+export interface StoredMatter {
+  /** Stable identity of this matter. */
+  readonly id: string;
+  /** The term carrying the feeling or decision that opened it. */
+  readonly anchorTermId: string;
+  /** When it was opened, as an ISO-8601 string. */
+  readonly firstAt: string;
+  /** When it was last raised, as an ISO-8601 string. */
+  readonly lastAt: string;
+  /**
+   * How many times it has been raised.
+   *
+   * The unit the threshold counts, and the one the glossary fixes: "raised three
+   * times" is worth more than "three days have passed" (`CONTEXT.md`, 阈值), and
+   * neither is the number of terms it happened to bring. One drop that attached
+   * is one, however many terms it said.
+   */
+  readonly raisedCount: number;
+  /** Every term supporting it, in the order they were first said. */
+  readonly supportTermIds: readonly string[];
+  /** The drops that fed it, oldest first. */
+  readonly drops: readonly MatterDrop[];
+}
+
+/** A matter that has just been opened by the drop that said its feeling. */
+export interface NewMatter {
+  /** The drop that opened it. */
+  readonly dropId: string;
+  /** The feeling or decision it opened around. */
+  readonly anchorTermId: string;
+  /** When, as an ISO-8601 string. */
+  readonly at: string;
+  /** The terms the opening drop contributed. */
+  readonly termIds: readonly string[];
+}
+
+/** A drop joining a matter that already exists. */
+export interface MatterGrowth {
+  /** The matter being joined. */
+  readonly matterId: string;
+  /** The drop joining it. */
+  readonly dropId: string;
+  /** The feeling or decision that drop brought, or null when it brought none. */
+  readonly anchorTermId: string | null;
+  /** When it joined, as an ISO-8601 string. */
+  readonly at: string;
+  /** The terms that drop contributes. */
+  readonly termIds: readonly string[];
+}
+
+/**
+ * One stored conclusion.
+ *
+ * The three numbers beside the sentence are the ones its wording was read off,
+ * stored as they stood at the time rather than recomputed later: a matter keeps
+ * growing, so a conclusion that recomputed them would explain itself with
+ * evidence that arrived after it spoke.
+ */
+export interface StoredConclusion {
+  /** Stable identity of this conclusion. */
+  readonly id: string;
+  /** Which matter it came out of. */
+  readonly matterId: string;
+  /** The sentence, frame included. */
+  readonly text: string;
+  /** Whether it claims a pattern, or catches the newest feeling. */
+  readonly kind: ConclusionKind;
+  /** The wording band, or null for a catch. */
+  readonly tier: ConclusionTier | null;
+  /** How it stands to the earlier conclusion for the same matter. */
+  readonly relation: ConclusionRelation;
+  /** The conclusion it carries on from, or null when it opened the chain. */
+  readonly supersedes: string | null;
+  /** When it was assembled, as an ISO-8601 string. */
+  readonly createdAt: string;
+  /** How many times the matter had been raised. */
+  readonly mentions: number;
+  /** How many whole days it had spanned. */
+  readonly spanDays: number;
+  /** How tightly its support connected to the feeling, 0 to 1. */
+  readonly averageStrength: number;
+  /** The terms supporting it, in the order they were said. */
+  readonly supportTermIds: readonly string[];
+}
+
+/** A conclusion the store has not minted an id for yet. */
+export type NewConclusion = Omit<StoredConclusion, 'id'>;
+
+/**
+ * How far the invisible settling has got.
+ *
+ * Deliberately about *timing* only — how much has piled up, and which way the
+ * alternation points. Nothing here says whether anything is due: that is read
+ * from the matters, which is what keeps "which matter crossed" in one place
+ * instead of two that can disagree.
+ *
+ * There is no "when the last fragment landed" beside it, and that is on purpose:
+ * the quiet window is carried by a timer armed at the drop itself, so a stored
+ * moment would be a second record of the same fact with nothing reading it. A
+ * pile left behind by a shutdown simply waits for the next drop, which arms the
+ * window again.
+ */
+export interface StoredSettlement {
+  /**
+   * How many drops have joined the accumulation since the last look.
+   *
+   * The pile the backstop counts, and deliberately not the number of *arrivals*:
+   * what a look judges is the material that has been read and attached, and a
+   * count of anything else would force a look at a pile that is not there yet —
+   * which is exactly the wrong moment, since the fragment that tripped the
+   * backstop would be the one missing from it.
+   */
+  readonly dropsSince: number;
+  /**
+   * Which way the next crossing looks: now, or on the quiet window.
+   *
+   * The alternation is stored rather than derived because it is a decision about
+   * the future: a restart must not turn "wait for the quiet window" back into
+   * "look now", or the rhythm would restart with the process.
+   */
+  readonly lookNowNext: boolean;
+}
+
+/**
  * What the domain needs the provider to have read, so it can be written down.
  *
  * Deliberately mirrors the provider's own result: the domain passes the reading
@@ -121,6 +288,33 @@ export interface ExtractOutcome {
   }[];
   /** The terms read out of the drop, in the user's own words. */
   readonly terms: readonly string[];
+  /**
+   * The term that carries the drop's feeling or decision, or null.
+   *
+   * One of `terms` above, or nothing: a reading that names something it did not
+   * list is a reading that contradicts itself, and the store records "no anchor"
+   * for it rather than inventing a term.
+   */
+  readonly anchor: string | null;
+}
+
+/**
+ * What the store made of one drop's reading.
+ *
+ * The two things it resolved, rather than what it was handed: a term's identity
+ * is minted here, and the anchor's is resolved here (the reading names a wording,
+ * the store knows whether that wording is one of the drop's own terms). Handing
+ * them back keeps the caller from reading the drop it already has — that row was
+ * captured *before* the reading landed, and its anchor is still empty.
+ */
+export interface RecordedReading {
+  /** The terms this drop said, in the order it said them, with their ids. */
+  readonly terms: readonly StoredTerm[];
+  /**
+   * The term the drop is about, or null when nothing was read or the anchor was
+   * not one of the drop's own terms.
+   */
+  readonly anchorTermId: string | null;
 }
 
 /**
@@ -128,7 +322,9 @@ export interface ExtractOutcome {
  *
  * Deliberately narrow: it records drops and what was read out of them — items,
  * terms, the links that follow from both being said together — and reads them
- * back. Later tickets widen this port as they add entities.
+ * back. It also keeps the two things ticket 05 settles into: the **matters**
+ * material accumulates into, and the conclusions assembled out of them. Later
+ * tickets widen this port as they add entities.
  */
 export interface DropStore {
   /**
@@ -141,8 +337,9 @@ export interface DropStore {
    *
    * @param body - the user's text, stored byte-for-byte.
    * @param reply - the line the drop is answered with.
+   * @param at - when it arrived, as an ISO-8601 string, from the domain's clock.
    */
-  appendDrop(body: string, reply: string): Promise<StoredDrop>;
+  appendDrop(body: string, reply: string, at: string): Promise<StoredDrop>;
 
   /**
    * Replace a drop's reply with the checked one the provider composed.
@@ -177,9 +374,10 @@ export interface DropStore {
    *
    * @param dropId - the drop that was read.
    * @param outcome - what was read out of it.
-   * @returns the terms this drop said, with the identities the store minted.
+   * @param at - when it was read, as an ISO-8601 string, from the domain's clock.
+   * @returns the terms this drop said, and what it turned out to be about.
    */
-  recordExtraction(dropId: string, outcome: ExtractOutcome): Promise<readonly StoredTerm[]>;
+  recordExtraction(dropId: string, outcome: ExtractOutcome, at: string): Promise<RecordedReading>;
 
   /** Every term recorded so far, in the order it was first said. */
   listTerms(): Promise<readonly StoredTerm[]>;
@@ -237,6 +435,94 @@ export interface DropStore {
    * @param links - the links to write, each without an id.
    */
   recordLinks(links: readonly NewLink[]): Promise<void>;
+
+  /** Every matter recorded so far, oldest first, each with its support. */
+  listMatters(): Promise<readonly StoredMatter[]>;
+
+  /**
+   * Open a matter around the feeling or decision that opened it.
+   *
+   * The opening drop is its first member and its terms its first support, so a
+   * matter never exists with nothing in it — an empty accumulation would be a
+   * thing to judge with no evidence behind it.
+   *
+   * @param matter - the drop, the anchor and the terms.
+   * @returns the matter as it now stands.
+   */
+  openMatter(matter: NewMatter): Promise<StoredMatter>;
+
+  /**
+   * Add a drop to a matter that already exists.
+   *
+   * Adding is idempotent per drop: a drop already recorded as a member of the
+   * matter is left alone, so a re-run converges rather than counting the same
+   * fragment twice — the raised count is the threshold's unit, and counting one
+   * drop twice would lower it.
+   *
+   * @param growth - the matter, the drop, and what it contributes.
+   */
+  growMatter(growth: MatterGrowth): Promise<void>;
+
+  /**
+   * Which matter a drop has already been accumulated into, or null.
+   *
+   * Asked before accumulating, so a drop that has already been read into a
+   * matter is not read into it again.
+   *
+   * @param dropId - the drop to look for.
+   * @returns the matter's id, or null when the drop is in none.
+   */
+  matterForDrop(dropId: string): Promise<string | null>;
+
+  /** Every conclusion assembled so far, oldest first. */
+  listConclusions(): Promise<readonly StoredConclusion[]>;
+
+  /**
+   * Write a conclusion that has been assembled.
+   *
+   * Append-only, and the store must not replace or merge anything: the chain
+   * only grows, because a judgement the product once made is part of the record
+   * even after it has been revised. The support terms are written with it, in
+   * the order they were said, since that is what the user is shown.
+   *
+   * @param conclusion - the conclusion to write, without an id.
+   * @returns the conclusion as stored, with the id the store minted.
+   */
+  appendConclusion(conclusion: NewConclusion): Promise<StoredConclusion>;
+
+  /** How far the invisible settling has got. */
+  readSettlement(): Promise<StoredSettlement>;
+
+  /**
+   * Record that one drop has joined the accumulation.
+   *
+   * Called once per drop that attached to a matter — not for one that had
+   * nothing to accumulate around — because the pile exists to be judged, and a
+   * fragment already read into nothing adds nothing to judge. It is also what
+   * arms the backstop, which counts *drops* rather than elapsed time: someone who
+   * types six fragments in one sitting has given the domain six things to look
+   * at, whether or not a minute has passed.
+   */
+  noteAttachment(): Promise<void>;
+
+  /**
+   * Record which way the next crossing looks.
+   *
+   * One value, written on its own rather than as part of the whole state: the
+   * counts beside it are incremented by the drops as they arrive, and rewriting
+   * the row from a value read a moment ago would quietly undo one of them.
+   *
+   * @param lookNowNext - true when the next crossing looks immediately.
+   */
+  setLookNowNext(lookNowNext: boolean): Promise<void>;
+
+  /**
+   * Record that a look happened, so the pile starts again.
+   *
+   * Its own write for the same reason as the turn: the arrival it would have to
+   * rewrite alongside it is being updated by the drops themselves.
+   */
+  resetPile(): Promise<void>;
 
   /** Release the underlying resource. */
   close(): Promise<void>;

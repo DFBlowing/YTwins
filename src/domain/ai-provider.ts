@@ -9,7 +9,16 @@
  * parent-voice rules, and has the domain check what comes back rather than
  * trusting it. Ticket 07 adds the two ends of **recall** — parsing a question,
  * and composing its answer. Ticket 04 adds the two ends of **linking**: encoding
- * text, and judging the pairs a score could not settle.
+ * text, and judging the pairs a score could not settle. Ticket 05 adds the one
+ * thing settling needs a model for — putting a matter that has crossed the
+ * threshold into a sentence — and gives `extract` the **anchor**: which of the
+ * terms it read carries the feeling or the decision the fragment is about.
+ *
+ * Note what settling does *not* put here: whether a matter may speak, when the
+ * invisible look happens, and how firmly the sentence is allowed to speak. Those
+ * are ordinary code inside the domain (`conclusions.ts`), read off counts and
+ * spans, so "why did it say that then" is answerable from numbers rather than
+ * from a model's mood.
  *
  * Note what linking does *not* put here: deciding whether two terms are linked.
  * The cosine and the thresholds are ordinary code inside the domain, so which
@@ -27,7 +36,7 @@
  * @module domain/ai-provider
  */
 
-import type { InputType, RecallSource } from './interface.ts';
+import type { ConclusionTier, InputType, RecallSource } from './interface.ts';
 
 /** What the provider is asked to say something about. */
 export interface RespondRequest {
@@ -123,6 +132,23 @@ export interface ExtractResult {
    * domain's to mint, exactly as they are for items.
    */
   readonly terms: readonly string[];
+  /**
+   * Which of those terms carries the feeling or the decision this fragment is
+   * about, or null when it carries neither.
+   *
+   * This is what the accumulation needs and a term list cannot say: the product
+   * settles around a **feeling or a decision** the user keeps coming back to
+   * (see `CONTEXT.md` — the threshold counts how often *that* was raised), and
+   * only a reader of the sentence knows which of them it is. A fragment with no
+   * feeling and no decision still keeps its terms; it just does not become
+   * something to accumulate around.
+   *
+   * The wording has the same contract as `terms`: it is the user's own string,
+   * and a value that is not one of the terms above is a reading that contradicts
+   * itself, which the domain treats as no anchor at all rather than inventing a
+   * term the user never said.
+   */
+  readonly anchor: string | null;
   /**
    * What kind of input this was, as the provider judged it.
    *
@@ -235,6 +261,57 @@ export interface ComposeAnswerResult {
 }
 
 /**
+ * A matter the provider is asked to put into one sentence.
+ *
+ * Only a matter that has already crossed the threshold arrives here: the domain
+ * never asks a model what it thinks of the accumulation, because that decision
+ * belongs to counts and spans rather than to an opinion.
+ */
+export interface ComposeConclusionRequest {
+  /**
+   * The feeling or decision the matter is about, in the user's own words.
+   *
+   * The **newest** one, not the one that opened the matter: a matter that began
+   * with 「好烦」 and last carried 「松了口气」 is about someone who has since
+   * relaxed, and a sentence built from the opening word describes a person who
+   * is no longer there.
+   */
+  readonly anchor: string;
+  /**
+   * Every term supporting the matter, oldest first, in the user's own words.
+   *
+   * The sentences the user actually typed, not a summary of them: a conclusion
+   * has to be checkable against the material, and a model handed categories
+   * instead of words can only answer in categories.
+   */
+  readonly terms: readonly string[];
+  /**
+   * The band the numbers earned.
+   *
+   * Context for the wording, not a licence to choose a tone: the frame that
+   * carries the strength is added by code afterwards (see `conclusions.ts`), so
+   * the sentence itself is written the same way whatever band it is in.
+   */
+  readonly tier: ConclusionTier;
+  /** The rules this sentence must obey, in the product's own words. */
+  readonly instructions: readonly string[];
+  /** Which rules the previous attempt broke, when this is the one retry. */
+  readonly violations?: readonly string[];
+}
+
+/** The provider's sentence for one matter. */
+export interface ComposeConclusionResult {
+  /**
+   * The sentence, without the band's frame.
+   *
+   * The domain adds the frame and rejects a blank: a conclusion rendered as an
+   * empty line beside its supporting terms would be the product claiming
+   * something it cannot say.
+   */
+  readonly text: string;
+}
+
+/**
  * The port. Implementations live outside the domain core — the domain holds the
  * interface, never a concrete provider.
  */
@@ -293,6 +370,22 @@ export interface AiProvider {
    * @returns whether the two should be linked.
    */
   judgeLink(request: JudgeLinkRequest): Promise<JudgeLinkResult>;
+
+  /**
+   * Put a matter that has crossed the threshold into one sentence.
+   *
+   * Called only when ordinary code has already decided that the matter may
+   * speak — the count crossed the threshold, the support is thick enough to claim
+   * something, and the look was due. The same tolerance applies as everywhere
+   * else: throwing, hanging or returning nonsense costs this round's sentence
+   * and nothing else, because the matter stays pending and the next look tries
+   * again. Silence is the honest failure here — a conclusion nobody could
+   * compose must not become a worse one.
+   *
+   * @param request - the matter's feeling, its terms, and the rules.
+   * @returns the sentence, before the band's frame is applied.
+   */
+  composeConclusion(request: ComposeConclusionRequest): Promise<ComposeConclusionResult>;
 
   /**
    * Work out what to look for when the user asks about their records.

@@ -22,6 +22,12 @@
  *    moment it is answering as of — that is what makes act two's "a few days
  *    later" basis observable at all.
  *
+ * Ticket 05 adds two more readings of the same fragment: which of its terms it is
+ * **about** (好烦, so the accumulation has something to gather around), and what a
+ * matter that has crossed the threshold sounds like. The band's frame is not here
+ * — the domain adds it, because how firmly the product speaks is decided by code
+ * from counts and spans and never by this module.
+ *
  * The **reply** is scripted (ticket 03). It has to be: the demo's fragment
  * carries a feeling, so a stand-in that fell through to its default would answer
  * an emotional drop with a bare acknowledgement — exactly the line the parent
@@ -36,7 +42,11 @@
  * @module web/demo-provider
  */
 
-import type { AiProvider, ComposeAnswerRequest } from '../domain/ai-provider.ts';
+import type {
+  AiProvider,
+  ComposeAnswerRequest,
+  ComposeConclusionRequest,
+} from '../domain/ai-provider.ts';
 import { createFakeProvider } from '../domain/fake-provider.ts';
 
 /**
@@ -78,6 +88,44 @@ const DEMO_ITEMS = [{ text: '下周三交提纲', dueAt: DEMO_DUE }] as const;
  * material, and where a vector per term belongs.
  */
 const DEMO_TERMS = ['期末怎么算分', '平时分 40%', '下周三交提纲', '好烦'] as const;
+
+/**
+ * The **anchor** act one shows that fragment is about (ticket 05).
+ *
+ * The feeling, not the subject: a matter accumulates around what the user keeps
+ * coming back to, and this fragment comes back to 好烦. The grading scheme is
+ * there, but it is not what the sentence would be about.
+ */
+const DEMO_ANCHOR = '好烦';
+
+/**
+ * What the stand-in says about a matter, per feeling it turns out to be about.
+ *
+ * Preset, like everything else here. The register matters: these are judgements
+ * out of accumulation, so they carry the uncertainty the evidence would earn —
+ * and the band's frame is added around them by the domain, which is why none of
+ * them says "我不太确定" itself.
+ */
+const DEMO_CLAIM_BY_FEELING: Readonly<Record<string, string>> = {
+  好烦: '你最近好像有几件事堆在一起，心里一直不太顺',
+  松了口气: '论文这条线最近总算松开了一点',
+  想学吉他: '你似乎真的很想学吉他',
+  睡不好: '你最近睡得不太好，而且它总跟期末连在一起',
+};
+
+/**
+ * Compose the demo's conclusion sentence.
+ *
+ * Exported so the preset material is visible in one place, and so the stand-in's
+ * limitation is legible: a feeling it has no sentence for gets a plain sentence
+ * built from the user's own wording, which is what a stand-in can honestly do
+ * without inventing a psychology for it.
+ */
+export function composeDemoConclusion(request: ComposeConclusionRequest): string {
+  const scripted = DEMO_CLAIM_BY_FEELING[request.anchor];
+  if (scripted !== undefined) return scripted;
+  return `你好像一直想着「${request.anchor}」这件事`;
+}
 
 /**
  * What to look for in the records.
@@ -140,7 +188,12 @@ export function createDemoProvider(): AiProvider {
     extractByBody: {
       [DEMO_DROP]: {
         kind: 'read',
-        reading: { inputType: 'item', items: DEMO_ITEMS, terms: DEMO_TERMS },
+        reading: {
+          inputType: 'item',
+          items: DEMO_ITEMS,
+          terms: DEMO_TERMS,
+          anchor: DEMO_ANCHOR,
+        },
       },
     },
     parseQuestionByQuestion: {
@@ -155,6 +208,9 @@ export function createDemoProvider(): AiProvider {
     ...fake,
     composeAnswer(request: ComposeAnswerRequest) {
       return Promise.resolve({ answer: composeDemoAnswer(request) });
+    },
+    composeConclusion(request: ComposeConclusionRequest) {
+      return Promise.resolve({ text: composeDemoConclusion(request) });
     },
   };
 }

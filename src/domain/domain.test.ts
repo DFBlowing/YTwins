@@ -25,6 +25,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { createDomain } from './core.ts';
+import type { ConclusionPolicy } from './conclusions.ts';
 import type { RespondRequest } from './ai-provider.ts';
 import {
   REPLY_THAT_BREAKS_THE_RULES,
@@ -33,7 +34,7 @@ import {
   type ExtractScript,
   type FakeProviderScript,
 } from './fake-provider.ts';
-import type { Domain, Term, TermLink } from './interface.ts';
+import type { Conclusion, Domain, Term, TermLink } from './interface.ts';
 import { openSqliteStore } from './sqlite-store.ts';
 
 let failures = 0;
@@ -1235,8 +1236,803 @@ await check('vectors from a different embedding model are never compared', async
   });
 });
 
-console.log('\ndomain core — recall');
+console.log('\ndomain core — what settles into a conclusion');
 
+/** A fragment, the terms it yields, and the feeling or decision it is about. */
+type AnchoredReading = readonly [body: string, terms: readonly string[], anchor: string | null];
+
+/**
+ * Script the fake to read those fragments into those terms and anchors, and
+ * nothing else. Nothing is scripted for embedding, judging or composing unless
+ * the check adds it, which is how a check can tell "code decided this" from "a
+ * model said this".
+ */
+function mattersOnly(
+  readings: readonly AnchoredReading[],
+  extra: Omit<FakeProviderScript, 'extractByBody'> = {},
+): ReturnType<typeof createFakeProvider> {
+  const extractByBody: Record<string, ExtractScript> = {};
+  for (const [body, terms, anchor] of readings) {
+    extractByBody[body] = {
+      kind: 'read',
+      reading: { inputType: 'emotion', items: [], terms, anchor },
+    };
+  }
+  return createFakeProvider({ ...extra, extractByBody });
+}
+
+/** Wait until at least `count` conclusions exist, then hand back every one. */
+async function readConclusions(domain: Domain, count: number): Promise<readonly Conclusion[]> {
+  await settledUntil(async () => (await domain.listConclusions()).length >= count);
+  return domain.listConclusions();
+}
+
+/**
+ * One matter said three times, in the demo's own material: the grading scheme,
+ * the outline that keeps being rewritten, and the 40% nobody explained.
+ *
+ * The three fragments share 「好烦」 and almost nothing else, which is what the
+ * rarity weighting is for — see the check that pins it.
+ */
+const EXAM_FIRST = '老师今天讲了期末怎么算分，下周三交提纲，好烦';
+const EXAM_SECOND = '今天又在改提纲，好烦';
+const EXAM_THIRD = '平时分那 40% 到底怎么算，好烦';
+const EXAM_READINGS: readonly AnchoredReading[] = [
+  [EXAM_FIRST, ['期末怎么算分', '下周三交提纲', '好烦'], '好烦'],
+  [EXAM_SECOND, ['改提纲', '好烦'], '好烦'],
+  [EXAM_THIRD, ['平时分 40%', '好烦'], '好烦'],
+];
+
+/** Every term the three fragments contributed, in the order they were said. */
+const EXAM_SUPPORT = ['期末怎么算分', '下周三交提纲', '好烦', '改提纲', '平时分 40%'];
+
+/**
+ * A fourth fragment about the same matter, arriving once a conclusion has been
+ * made — the crossing the alternation decides to leave to the quiet window.
+ */
+const EXAM_FOURTH = '期末考那一项到底考什么，好烦';
+const EXAM_FOURTH_READING: AnchoredReading = [EXAM_FOURTH, ['期末考', '好烦'], '好烦'];
+
+/** What the fake says about a matter it is asked to put into a sentence. */
+const EXAM_SENTENCE = '你最近好像有几件事堆在一起';
+
+await check('a matter raised three times becomes one conclusion, with the terms that support it', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = mattersOnly(EXAM_READINGS, {
+        composeConclusionByAnchor: { 好烦: { kind: 'sentence', text: EXAM_SENTENCE } },
+      });
+      const domain = createDomain({ store, provider });
+
+      for (const body of [EXAM_FIRST, EXAM_SECOND, EXAM_THIRD]) await domain.drop(body);
+      const conclusions = await readConclusions(domain, 1);
+
+      assert.equal(conclusions.length, 1, 'three mentions are enough for one sentence');
+      const [conclusion] = conclusions;
+      assert.equal(conclusion?.kind, 'claim');
+      // Same session, so nothing has spanned yet: the weak band is the one whose
+      // frame says outright that it is unsure.
+      assert.equal(conclusion?.tier, 'weak');
+      assert.equal(
+        conclusion?.text,
+        '我不太确定：你最近好像有几件事堆在一起。',
+        'the sentence is the provider\'s, the frame is the product\'s',
+      );
+      assert.deepEqual(
+        conclusion?.support.map((term) => term.text),
+        EXAM_SUPPORT,
+        'the whole supporting set, in the user\'s own words',
+      );
+      assert.equal(conclusion?.mentions, 3);
+      assert.equal(conclusion?.relation, 'first');
+      assert.equal(conclusion?.supersedes, null);
+      assert.equal(conclusion?.supersededBy, null);
+      assert.ok(Number.isFinite(Date.parse(conclusion?.createdAt ?? '')));
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+/**
+ * A fragment that carries neither a feeling nor a decision, so there is nothing
+ * for an accumulation to be *about*. Its terms are still kept.
+ */
+const WEATHER_DROP = '今天天气不错，适合出门走走';
+
+/** Wait until every drop has been read, so a look has had its chance to run. */
+async function settleReadings(domain: Domain): Promise<void> {
+  await settledUntil(async () => (await domain.listDrops()).every((drop) => drop.extracted));
+  // A look may still be in flight behind the reading; give the invisible work
+  // the same small moment the checks below give it before asserting on absence.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+}
+
+await check('two mentions are not enough to say anything', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = mattersOnly(EXAM_READINGS.slice(0, 2), {
+        composeConclusionByAnchor: { 好烦: { kind: 'sentence', text: EXAM_SENTENCE } },
+      });
+      const domain = createDomain({ store, provider });
+
+      await domain.drop(EXAM_FIRST);
+      await domain.drop(EXAM_SECOND);
+      await settleReadings(domain);
+
+      assert.deepEqual(
+        await domain.listConclusions(),
+        [],
+        'the third time is what the threshold is set at',
+      );
+      assert.equal(provider.composed.length, 0, 'and nobody was asked to phrase anything');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a fragment with no feeling and no decision is kept, and accumulates into nothing', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = mattersOnly(
+        [
+          [EXAM_FIRST, ['期末怎么算分', '下周三交提纲', '好烦'], '好烦'],
+          [WEATHER_DROP, ['天气不错'], null],
+        ],
+        { composeConclusionByAnchor: { 好烦: { kind: 'sentence', text: EXAM_SENTENCE } } },
+      );
+      const domain = createDomain({ store, provider });
+
+      await domain.drop(EXAM_FIRST);
+      const weather = await domain.drop(WEATHER_DROP);
+      // Said three times, so the count alone would have been enough — what is
+      // missing is something to be about.
+      await domain.drop(WEATHER_DROP);
+      await domain.drop(WEATHER_DROP);
+      await settleReadings(domain);
+
+      assert.deepEqual(await domain.listConclusions(), [], 'there is no "about" to mark');
+      assert.deepEqual(
+        (await domain.getDrop(weather.id))?.terms.map((term) => term.text),
+        ['天气不错'],
+        'and the words said are kept all the same',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+/**
+ * The policy a check pins, spelled out rather than spread from the default.
+ *
+ * A check should fail when the rule it is about changes, and a policy built by
+ * spreading the default would quietly follow one. The window is a minute unless
+ * a check says otherwise, which is "long enough that the timer cannot be what
+ * makes this check pass".
+ */
+function policy(overrides: Partial<ConclusionPolicy> = {}): ConclusionPolicy {
+  return {
+    threshold: 3,
+    quietWindowMs: 60_000,
+    pendingLimit: 6,
+    judgeTiming: 'alternate',
+    claimFloor: 3,
+    overlapRatio: 0.5,
+    weightSharedBySpread: true,
+    mediumTerms: 3,
+    mediumSpanDays: 3,
+    strongTerms: 6,
+    strongSpanDays: 14,
+    strongStrength: 0.8,
+    ...overrides,
+  };
+}
+
+await check('the quiet window holds a crossing back until the fragments stop coming', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = mattersOnly(EXAM_READINGS, {
+        composeConclusionByAnchor: { 好烦: { kind: 'sentence', text: EXAM_SENTENCE } },
+      });
+      const domain = createDomain({
+        store,
+        provider,
+        conclusionPolicy: policy({ judgeTiming: 'quiet', quietWindowMs: 10_000 }),
+      });
+
+      for (const body of [EXAM_FIRST, EXAM_SECOND, EXAM_THIRD]) await domain.drop(body);
+      await settleReadings(domain);
+
+      assert.deepEqual(
+        await domain.listConclusions(),
+        [],
+        'three sentences in one sitting are one thought, and it is still being had',
+      );
+      assert.equal(provider.composed.length, 0, 'so nothing was phrased yet either');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('once the fragments have gone quiet, the look happens on its own', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = mattersOnly(EXAM_READINGS, {
+        composeConclusionByAnchor: { 好烦: { kind: 'sentence', text: EXAM_SENTENCE } },
+      });
+      // No further drop, and nobody asking: only the quiet window can make this
+      // pass, which is what makes it a check on the window rather than on the
+      // count trigger.
+      const domain = createDomain({
+        store,
+        provider,
+        conclusionPolicy: policy({ judgeTiming: 'quiet', quietWindowMs: 40 }),
+      });
+
+      for (const body of [EXAM_FIRST, EXAM_SECOND, EXAM_THIRD]) await domain.drop(body);
+      const conclusions = await readConclusions(domain, 1);
+
+      assert.equal(conclusions.length, 1, 'the window ended, so it looked');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('the backstop forces a look for someone who never pauses', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = mattersOnly(EXAM_READINGS, {
+        composeConclusionByAnchor: { 好烦: { kind: 'sentence', text: EXAM_SENTENCE } },
+      });
+      // The window is an hour: if anything settles here, it is the backstop.
+      const domain = createDomain({
+        store,
+        provider,
+        conclusionPolicy: policy({
+          judgeTiming: 'quiet',
+          quietWindowMs: 3_600_000,
+          pendingLimit: 3,
+        }),
+      });
+
+      for (const body of [EXAM_FIRST, EXAM_SECOND, EXAM_THIRD]) await domain.drop(body);
+      const conclusions = await readConclusions(domain, 1);
+
+      assert.equal(conclusions.length, 1, 'three drops in is where the backstop looks');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('the look alternates: the crossing after a spoken one waits for the window', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = mattersOnly(
+        [...EXAM_READINGS, EXAM_FOURTH_READING],
+        { composeConclusionByAnchor: { 好烦: { kind: 'sentence', text: EXAM_SENTENCE } } },
+      );
+      // The window is short enough to end inside the check, and long enough that
+      // the assertion below cannot race it.
+      const domain = createDomain({
+        store,
+        provider,
+        conclusionPolicy: policy({ quietWindowMs: 300 }),
+      });
+
+      for (const body of [EXAM_FIRST, EXAM_SECOND, EXAM_THIRD]) await domain.drop(body);
+      assert.equal((await readConclusions(domain, 1)).length, 1, 'the first crossing looks now');
+      assert.equal(provider.composed.length, 1, 'and it is spoken about immediately');
+
+      // A fourth mention crosses the threshold again, and the turn has turned.
+      await domain.drop(EXAM_FOURTH);
+      await settleReadings(domain);
+      assert.equal(
+        (await domain.listConclusions()).length,
+        1,
+        'this crossing is left to the quiet window, so nothing was said at the drop',
+      );
+      assert.equal(provider.composed.length, 1, 'and nobody was asked, either');
+
+      assert.equal(
+        (await readConclusions(domain, 2)).length,
+        2,
+        'once it goes quiet, the second conclusion arrives',
+      );
+      assert.ok(provider.composed.length >= 2, 'and the provider was asked that time');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+/** Three fragments about three different things, sharing only the word 好烦. */
+const THESIS_DROP = '论文开题被导师打回了，好烦';
+const ROOMMATE_DROP = '室友半夜还在打游戏，好烦';
+const SLEEP_DROP = '又睡不好，好烦';
+
+await check('the threshold is a value the core was given, not a fixed number', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = mattersOnly([...EXAM_READINGS, EXAM_FOURTH_READING], {
+        composeConclusionByAnchor: { 好烦: { kind: 'sentence', text: EXAM_SENTENCE } },
+      });
+      const strict = createDomain({
+        store,
+        provider,
+        conclusionPolicy: policy({ threshold: 4, judgeTiming: 'count' }),
+      });
+
+      for (const body of [EXAM_FIRST, EXAM_SECOND, EXAM_THIRD]) await strict.drop(body);
+      await settleReadings(strict);
+      assert.deepEqual(await strict.listConclusions(), [], 'three is not enough at a threshold of four');
+
+      // A different value on the same material, and the next drop is the one it
+      // governs: the five fragments already read are not rewritten by it.
+      const lenient = createDomain({
+        store,
+        provider,
+        conclusionPolicy: policy({ judgeTiming: 'count' }),
+      });
+      await lenient.drop(EXAM_FOURTH);
+      const conclusions = await readConclusions(lenient, 1);
+
+      assert.equal(conclusions.length, 1, 'and the crossing is judged once the value allows it');
+      assert.equal(conclusions[0]?.mentions, 4, 'with the count it had when it was judged');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a shared word spread across matters stops counting as evidence, so two things stay two', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = mattersOnly(
+        [
+          [THESIS_DROP, ['论文开题', '导师', '好烦'], '好烦'],
+          [ROOMMATE_DROP, ['打游戏', '室友', '好烦'], '好烦'],
+          [SLEEP_DROP, ['睡不好', '好烦'], '好烦'],
+        ],
+        {
+          // 好烦 is the only word the three share, so the weighting is the only
+          // thing that can keep them apart.
+          composeConclusionByAnchor: { 好烦: { kind: 'sentence', text: '你最近好像有几件事堆在一起' } },
+        },
+      );
+      const domain = createDomain({ store, provider, conclusionPolicy: policy({ judgeTiming: 'count' }) });
+
+      await domain.drop(THESIS_DROP);
+      await domain.drop(ROOMMATE_DROP);
+      await domain.drop(SLEEP_DROP);
+      // 论文开题 said three times, so the threshold is crossed — and what the
+      // conclusion is made of is the question this check is about.
+      await domain.drop(THESIS_DROP);
+      await domain.drop(THESIS_DROP);
+      const conclusions = await readConclusions(domain, 1);
+
+      assert.equal(conclusions.length, 1);
+      assert.deepEqual(
+        conclusions[0]?.support.map((term) => term.text),
+        ['论文开题', '导师', '好烦'],
+        'only the words that belong to the matter it is about',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('with the weighting off, the same three sentences merge — the misfire it prevents', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = mattersOnly(
+        [
+          [THESIS_DROP, ['论文开题', '导师', '好烦'], '好烦'],
+          [ROOMMATE_DROP, ['打游戏', '室友', '好烦'], '好烦'],
+          [SLEEP_DROP, ['睡不好', '好烦'], '好烦'],
+        ],
+        {
+          composeConclusionByAnchor: { 好烦: { kind: 'sentence', text: '你最近好像有几件事堆在一起' } },
+        },
+      );
+      const domain = createDomain({
+        store,
+        provider,
+        conclusionPolicy: policy({ judgeTiming: 'count', weightSharedBySpread: false }),
+      });
+
+      await domain.drop(THESIS_DROP);
+      await domain.drop(ROOMMATE_DROP);
+      await domain.drop(SLEEP_DROP);
+      // The fourth is what the first matter needs, because 睡不好 joined it and
+      // 论文开题 was only said twice.
+      await domain.drop(THESIS_DROP);
+      const conclusions = await readConclusions(domain, 1);
+
+      // Three mentions is reached by the fourth fragment here, because 打游戏
+      // stayed out but 睡不好 was pulled into the first matter on one word.
+      assert.equal(conclusions.length, 1);
+      assert.deepEqual(
+        conclusions[0]?.support.map((term) => term.text),
+        ['论文开题', '导师', '好烦', '睡不好'],
+        'the roommate fragment is a matter of its own even so; the sleep one is not',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+/** A clock a check can move, so a matter may span days without anyone waiting. */
+function simulatedClock(start: string): { now: () => string; advanceDays: (days: number) => void } {
+  let at = Date.parse(start);
+  return {
+    now: () => new Date(at).toISOString(),
+    advanceDays: (days: number) => {
+      at += days * 86_400_000;
+    },
+  };
+}
+
+/** A matter opened by 好烦 that later carries 松了口气: the author's own case. */
+const THESIS_REJECT = '论文开题被导师打回了，好烦';
+const INTERN_REPORT = '导师让我这周交实习报告，好烦';
+const THESIS_PROGRESS = '论文开题又改了一版，导师说方向可以了，松了口气';
+
+/** What the fake says about each feeling it is asked to put into a sentence. */
+const SENTENCE_BY_FEELING = {
+  好烦: { kind: 'sentence', text: EXAM_SENTENCE },
+  松了口气: { kind: 'sentence', text: '论文这条线最近总算松开了一点' },
+} as const;
+
+await check('the sentence follows the newest feeling, not the one that opened the matter', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = mattersOnly(
+        [
+          [THESIS_REJECT, ['论文开题', '导师', '好烦'], '好烦'],
+          [INTERN_REPORT, ['实习报告', '导师', '好烦'], '好烦'],
+          [THESIS_PROGRESS, ['论文开题', '导师', '松了口气'], '松了口气'],
+        ],
+        { composeConclusionByAnchor: SENTENCE_BY_FEELING },
+      );
+      const domain = createDomain({ store, provider });
+
+      for (const body of [THESIS_REJECT, INTERN_REPORT, THESIS_PROGRESS]) await domain.drop(body);
+      const conclusions = await readConclusions(domain, 1);
+
+      assert.equal(provider.composed.length, 1);
+      assert.equal(
+        provider.composed[0]?.anchor,
+        '松了口气',
+        'the person is in the newest feeling, not the one they opened with',
+      );
+      assert.equal(conclusions[0]?.text, '我不太确定：论文这条线最近总算松开了一点。');
+      assert.deepEqual(
+        conclusions[0]?.support.map((term) => term.text),
+        ['论文开题', '导师', '好烦', '实习报告', '松了口气'],
+        'while the material behind it keeps everything that was said',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('how firmly it may speak is read off terms, span and connection — not off the threshold', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const clock = simulatedClock('2026-09-01T09:00:00.000Z');
+      const provider = mattersOnly(
+        [...EXAM_READINGS, EXAM_FOURTH_READING],
+        { composeConclusionByAnchor: SENTENCE_BY_FEELING },
+      );
+      const domain = createDomain({
+        store,
+        provider,
+        conclusionPolicy: policy({ judgeTiming: 'count' }),
+        now: clock.now,
+      });
+
+      await domain.drop(EXAM_FIRST);
+      clock.advanceDays(1);
+      await domain.drop(EXAM_SECOND);
+      clock.advanceDays(15);
+      await domain.drop(EXAM_THIRD);
+      const [medium] = await readConclusions(domain, 1);
+
+      assert.equal(medium?.tier, 'medium', 'five terms over sixteen days is not hedged any more');
+      assert.equal(medium?.mentions, 3);
+      assert.equal(medium?.spanDays, 16);
+      assert.equal(medium?.text, `${EXAM_SENTENCE}。`, 'so the frame adds nothing');
+
+      clock.advanceDays(1);
+      await domain.drop(EXAM_FOURTH);
+      const conclusions = await readConclusions(domain, 2);
+      const strong = conclusions[1];
+
+      assert.equal(strong?.tier, 'strong', 'six terms, seventeen days and tight links');
+      assert.equal(strong?.spanDays, 17);
+      assert.equal(strong?.averageStrength, 1, 'every term was said in the same breath as the feeling');
+      assert.equal(strong?.text, `这段时间我看到一条线：${EXAM_SENTENCE}。`);
+      assert.deepEqual(
+        provider.composed.map((request) => request.tier),
+        ['medium', 'strong'],
+        'and the band travels with the sentence, so the provider knows how it will read',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('too few terms to claim anything, so it catches the newest feeling instead — at no model cost', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const body = '今天又在改提纲，好烦';
+      const provider = mattersOnly([[body, ['改提纲', '好烦'], '好烦']], {
+        // The line the drop was answered with. A catch reuses it rather than
+        // asking for a sentence: it claims nothing, so there is nothing to phrase.
+        byBody: { [body]: { kind: 'reply', reply: '那样真好。' } },
+        composeConclusionByAnchor: SENTENCE_BY_FEELING,
+      });
+      // The window gives the drop's own line its moment to land, which is what
+      // makes "the catch is that line" checkable rather than a race.
+      const domain = createDomain({
+        store,
+        provider,
+        conclusionPolicy: policy({ judgeTiming: 'quiet', quietWindowMs: 50 }),
+      });
+
+      for (let time = 0; time < 3; time += 1) await domain.drop(body);
+      const [caught] = await readConclusions(domain, 1);
+
+      assert.equal(caught?.kind, 'catch', 'two terms is not something to make a claim from');
+      assert.equal(caught?.tier, null, 'and a catch asserts nothing, so no band applies');
+      assert.equal(caught?.text, '那样真好。', 'it says the line the newest feeling was answered with');
+      assert.equal(caught?.mentions, 3, 'even though the threshold was crossed');
+      assert.deepEqual(provider.composed, [], 'the model was never asked to judge anything');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a sentence that breaks the rules is asked for once more, and told what it broke', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const requests: string[][] = [];
+      const provider = mattersOnly(EXAM_READINGS, {
+        composeConclusionAttempts: {
+          好烦: [
+            { kind: 'sentence', text: '你是不是想学吉他？' },
+            { kind: 'sentence', text: EXAM_SENTENCE },
+          ],
+        },
+        onComposeConclusion: (request) => {
+          requests.push([...(request.violations ?? [])]);
+        },
+      });
+      const domain = createDomain({ store, provider });
+
+      for (const body of [EXAM_FIRST, EXAM_SECOND, EXAM_THIRD]) await domain.drop(body);
+      const conclusions = await readConclusions(domain, 1);
+
+      assert.equal(conclusions.length, 1, 'the second attempt passed');
+      assert.equal(conclusions[0]?.text, `我不太确定：${EXAM_SENTENCE}。`);
+      assert.equal(requests.length, 2, 'one attempt and one retry, no more');
+      assert.deepEqual(requests[0], [], 'the first attempt was told nothing');
+      assert.ok(
+        (requests[1] ?? []).includes('question'),
+        'and the retry was told what the first one broke',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a sentence that cannot be composed leaves the matter unspoken rather than invented', async () => {
+  await withDatabase(async (file) => {
+    const first = openSqliteStore(file);
+    const clock = simulatedClock('2026-09-01T09:00:00.000Z');
+    try {
+      const broken = mattersOnly(EXAM_READINGS, {
+        composeConclusionFallback: { kind: 'fail', reason: 'the model is down' },
+      });
+      const domain = createDomain({
+        store: first,
+        provider: broken,
+        conclusionPolicy: policy({ judgeTiming: 'count' }),
+        now: clock.now,
+      });
+
+      for (const body of [EXAM_FIRST, EXAM_SECOND, EXAM_THIRD]) await domain.drop(body);
+      await settleReadings(domain);
+      assert.deepEqual(await domain.listConclusions(), [], 'nothing was said, and nothing invented');
+      assert.ok(broken.composed.length > 0, 'it was asked, and it failed every time it was');
+    } finally {
+      await first.close();
+    }
+
+    // A provider that does answer, on the same material: the crossing was never
+    // spent, so the next look speaks about it.
+    const second = openSqliteStore(file);
+    try {
+      const working = mattersOnly([...EXAM_READINGS, EXAM_FOURTH_READING], {
+        composeConclusionByAnchor: SENTENCE_BY_FEELING,
+      });
+      const domain = createDomain({
+        store: second,
+        provider: working,
+        conclusionPolicy: policy({ judgeTiming: 'count' }),
+        now: clock.now,
+      });
+
+      clock.advanceDays(1);
+      await domain.drop(EXAM_FOURTH);
+      const conclusions = await readConclusions(domain, 1);
+
+      assert.equal(conclusions.length, 1, 'the material was still pending');
+      assert.equal(conclusions[0]?.mentions, 4, 'and it carries everything said by then');
+    } finally {
+      await second.close();
+    }
+  });
+});
+
+await check('a later conclusion carries the chain on, and the earlier one is not replaced', async () => {
+  await withDatabase(async (file) => {
+    const first = openSqliteStore(file);
+    const clock = simulatedClock('2026-09-01T09:00:00.000Z');
+    const provider = mattersOnly(
+      [...EXAM_READINGS, EXAM_FOURTH_READING],
+      { composeConclusionByAnchor: SENTENCE_BY_FEELING },
+    );
+    try {
+      const domain = createDomain({
+        store: first,
+        provider,
+        conclusionPolicy: policy({ judgeTiming: 'count' }),
+        now: clock.now,
+      });
+
+      for (const body of [EXAM_FIRST, EXAM_SECOND, EXAM_THIRD]) await domain.drop(body);
+      const [opened] = await readConclusions(domain, 1);
+      clock.advanceDays(1);
+      await domain.drop(EXAM_FOURTH);
+      const conclusions = await readConclusions(domain, 2);
+      const [earlier, later] = conclusions;
+
+      assert.equal(earlier?.relation, 'first');
+      assert.equal(later?.relation, 'inherit');
+      assert.equal(later?.supersedes?.id, earlier?.id, 'the chain points backwards');
+      assert.equal(later?.supersedes?.text, earlier?.text);
+      assert.equal(earlier?.supersededBy?.id, later?.id, 'and forwards, without being stored twice');
+      assert.equal(opened?.text, earlier?.text, 'the earlier sentence was not rewritten');
+    } finally {
+      await first.close();
+    }
+
+    // The same chain, read from a process that did not make it.
+    const second = openSqliteStore(file);
+    try {
+      const conclusions = await createDomain({ store: second }).listConclusions();
+      assert.equal(conclusions.length, 2, 'both conclusions are on disk');
+      assert.equal(
+        conclusions[0]?.supersededBy?.id,
+        conclusions[1]?.id,
+        'and so is the relation between them',
+      );
+      assert.deepEqual(
+        Object.keys(conclusions[0] ?? {}).sort(),
+        [
+          'averageStrength',
+          'createdAt',
+          'id',
+          'kind',
+          'mentions',
+          'relation',
+          'spanDays',
+          'supersededBy',
+          'supersedes',
+          'support',
+          'text',
+          'tier',
+        ],
+        'with nothing of the scaffolding it was assembled from',
+      );
+    } finally {
+      await second.close();
+    }
+  });
+});
+
+await check('one rich fragment is still one mention: the threshold counts times, not terms', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      // Six terms in one breath. Counting terms would call this enough to speak
+      // on its own; counting times says it has been said once.
+      const rich = '期末怎么算分、平时分 40%、下周三交提纲、期末考、提纲格式，还有好烦';
+      const provider = mattersOnly(
+        [[rich, ['期末怎么算分', '平时分 40%', '下周三交提纲', '期末考', '提纲格式', '好烦'], '好烦']],
+        { composeConclusionByAnchor: SENTENCE_BY_FEELING },
+      );
+      const domain = createDomain({ store, provider });
+
+      await domain.drop(rich);
+      await settleReadings(domain);
+      assert.deepEqual(await domain.listConclusions(), [], 'said once is said once');
+
+      await domain.drop(rich);
+      await domain.drop(rich);
+      const [conclusion] = await readConclusions(domain, 1);
+
+      assert.equal(conclusion?.mentions, 3, 'the third time is what the threshold counts');
+      assert.equal(conclusion?.support.length, 6, 'and everything it said is behind it');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a catch keeps a conclusion\'s shape, even when the feeling\'s own line does not', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const body = '今天又在改提纲，好烦';
+      // A perfectly good *reply*: two sentences, and one of them a question.
+      // A conclusion — or a catch standing in for one — may be neither.
+      const asking = '听着今天不太好受。要不要说说？';
+      const provider = mattersOnly([[body, ['改提纲', '好烦'], '好烦']], {
+        byBody: { [body]: { kind: 'reply', reply: asking } },
+        composeConclusionByAnchor: SENTENCE_BY_FEELING,
+      });
+      const domain = createDomain({
+        store,
+        provider,
+        conclusionPolicy: policy({ judgeTiming: 'quiet', quietWindowMs: 50 }),
+      });
+
+      const dropped = await domain.drop(body);
+      await domain.drop(body);
+      await domain.drop(body);
+      const [caught] = await readConclusions(domain, 1);
+
+      assert.equal(
+        (await domain.getDrop(dropped.id))?.reply,
+        asking,
+        'the drop itself was answered with that line',
+      );
+      assert.equal(caught?.kind, 'catch');
+      assert.equal(caught?.text, '嗯，我在。', 'and the catch falls back to the line code owns');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+console.log('\ndomain core — recall');
 /** The drop the demo's act two asks about, plus one that must not be recalled. */
 const GRADING_DROP = '老师今天讲了期末怎么算分：平时分 40%，期末考 60%，下周三交提纲';
 const OUTLINE_DROP = '提纲要求下周交，格式和期末怎么算分有关';

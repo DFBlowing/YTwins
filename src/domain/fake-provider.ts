@@ -14,7 +14,10 @@
  * "check → regenerate once → degrade" path, and offers the reply that
  * deliberately breaks the rules as a script of its own. Ticket 04 adds the two
  * ends of linking: a vector per text, and a verdict per pair — both scripted,
- * so a link's existence and strength are numbers the check chose.
+ * so a link's existence and strength are numbers the check chose. Ticket 05 adds
+ * the one thing settling needs a model for: a sentence for a matter that has
+ * crossed the threshold, scripted per feeling so a check can tell which feelings
+ * the domain decided a matter was about.
  *
  * @module domain/fake-provider
  */
@@ -23,6 +26,8 @@ import type {
   AiProvider,
   ComposeAnswerRequest,
   ComposeAnswerResult,
+  ComposeConclusionRequest,
+  ComposeConclusionResult,
   EmbedRequest,
   EmbedResult,
   ExtractRequest,
@@ -85,6 +90,14 @@ export interface ExtractReading {
    * default — a check that wants terms asks for them.
    */
   readonly terms?: readonly string[];
+  /**
+   * Which of those terms carries the feeling or decision, if any.
+   *
+   * Optional and defaulting to none, for the same reason as `terms`: a fragment
+   * that is about nothing in particular is the honest default, and a check that
+   * wants a matter to accumulate has to ask for one.
+   */
+  readonly anchor?: string | null;
 }
 
 /** What the fake should do for one input, when reading. */
@@ -106,6 +119,11 @@ export type ParseQuestionScript =
 /** What the fake should answer, once records have been found. */
 export type ComposeScript = FailureScript | { readonly kind: 'answer'; readonly answer: string };
 
+/** What the fake should say about one matter, as one sentence. */
+export type ComposeConclusionScript =
+  | FailureScript
+  | { readonly kind: 'sentence'; readonly text: string };
+
 /** Every script this fake understands, so the failure guard can see them all. */
 export type AnyScript =
   | RespondScript
@@ -113,7 +131,8 @@ export type AnyScript =
   | ParseQuestionScript
   | ComposeScript
   | EmbedScript
-  | JudgeLinkScript;
+  | JudgeLinkScript
+  | ComposeConclusionScript;
 
 /** Configure the fake: a default, plus per-body overrides. */
 export interface FakeProviderScript {
@@ -167,6 +186,31 @@ export interface FakeProviderScript {
    */
   readonly judgeLinkFallback?: JudgeLinkScript;
   readonly judgeLinkByPair?: Readonly<Record<string, JudgeLinkScript>>;
+  /**
+   * What to say about a matter. Keyed by the feeling it is about, so a check can
+   * script "a matter about 好烦 reads like this" and then assert which feeling
+   * the domain decided a matter was about — the answer to a question the term
+   * list alone cannot settle.
+   */
+  readonly composeConclusionFallback?: ComposeConclusionScript;
+  readonly composeConclusionByAnchor?: Readonly<Record<string, ComposeConclusionScript>>;
+  /**
+   * What to say on the first, second, … attempt for one feeling.
+   *
+   * The last entry repeats, so a script can say "always this" with one element.
+   * Needed because the domain asks again when the first sentence breaks the
+   * rules, and a fake that answered the same thing twice could not tell the two
+   * paths apart.
+   */
+  readonly composeConclusionAttempts?: Readonly<Record<string, readonly ComposeConclusionScript[]>>;
+  /**
+   * Observe each sentence as it is asked for.
+   *
+   * A callback, like the other observations: what a check needs is what the
+   * provider was *told* — the newest feeling, the terms, the band — and those
+   * only exist per call.
+   */
+  readonly onComposeConclusion?: (request: ComposeConclusionRequest) => void;
 }
 
 /** One pair put to `judgeLink`, as the fake saw it. */
@@ -187,6 +231,8 @@ export interface FakeProvider extends AiProvider {
   readonly embedded: readonly string[];
   /** Every pair the domain put to `judgeLink`, in the order it asked. */
   readonly judged: readonly JudgedPair[];
+  /** Every matter the domain asked it to put into a sentence, in order. */
+  readonly composed: readonly ComposeConclusionRequest[];
 }
 
 /**
@@ -196,7 +242,7 @@ export interface FakeProvider extends AiProvider {
  * model every real-world case, and a drop that turns out to contain nothing is
  * the honest default — a test that wants items asks for them explicitly.
  */
-const UNSCRIPTED_READING: ExtractResult = { inputType: 'item', items: [], terms: [] };
+const UNSCRIPTED_READING: ExtractResult = { inputType: 'item', items: [], terms: [], anchor: null };
 
 function fail(script: FailureScript): never {
   switch (script.kind) {
@@ -246,6 +292,10 @@ function runExtract(script: ExtractScript | undefined): Promise<ExtractResult> {
     inputType: script.reading.inputType,
     items: script.reading.items,
     terms: script.reading.terms ?? [],
+    // A reading that names an anchor it did not list is not repaired here: the
+    // fake hands over what it was scripted with, and the domain is the one that
+    // decides what a contradictory reading means.
+    anchor: script.reading.anchor ?? null,
   });
 }
 
@@ -279,6 +329,25 @@ function runCompose(script: ComposeScript | undefined): Promise<ComposeAnswerRes
 }
 
 /**
+ * What an unscripted matter reads as.
+ *
+ * Nothing, and it **fails** rather than answering, for the same reason
+ * composition does: the whole point of a conclusion is that it is the product's
+ * own judgement, and a fake that defaulted to a placeholder sentence would be
+ * putting words in its mouth that no check ever scripted. A check that wants a
+ * conclusion asks for one.
+ */
+function runComposeConclusion(script: ComposeConclusionScript | undefined): Promise<ComposeConclusionResult> {
+  if (script === undefined) {
+    return Promise.reject(
+      new Error('no conclusion script: the fake will not invent a judgement'),
+    );
+  }
+  if (isFailure(script)) return fail(script);
+  return Promise.resolve({ text: script.text });
+}
+
+/**
  * Build a fake provider.
  *
  * @param script - the default behaviour and any per-body overrides.
@@ -290,14 +359,18 @@ export function createFakeProvider(script: FakeProviderScript = {}): FakeProvide
   const askedQuestions: string[] = [];
   const embedded: string[] = [];
   const judged: JudgedPair[] = [];
+  const composed: ComposeConclusionRequest[] = [];
   /** How many times each body has been answered, which picks its attempt script. */
   const answered = new Map<string, number>();
+  /** How many times each matter has been asked about, for the same reason. */
+  const concluded = new Map<string, number>();
   return {
     seen,
     read,
     askedQuestions,
     embedded,
     judged,
+    composed,
     // Deliberately NOT `async`. An `async` method would turn the `throw` script
     // into a rejected promise, and the whole point of that script is to hand the
     // domain a genuinely synchronous throw — the shape that a naive
@@ -329,6 +402,18 @@ export function createFakeProvider(script: FakeProviderScript = {}): FakeProvide
     composeAnswer(request: ComposeAnswerRequest): Promise<ComposeAnswerResult> {
       script.onCompose?.(request);
       return runCompose(script.composeFallback);
+    },
+    composeConclusion(request: ComposeConclusionRequest): Promise<ComposeConclusionResult> {
+      composed.push(request);
+      script.onComposeConclusion?.(request);
+      const previous = concluded.get(request.anchor) ?? 0;
+      concluded.set(request.anchor, previous + 1);
+      const attempts = script.composeConclusionAttempts?.[request.anchor];
+      const scripted =
+        attempts === undefined ? undefined : attempts[Math.min(previous, attempts.length - 1)];
+      return runComposeConclusion(
+        scripted ?? script.composeConclusionByAnchor?.[request.anchor] ?? script.composeConclusionFallback,
+      );
     },
     // Not `async`, for the same reason as `respond`: `fail` may throw
     // synchronously, and hiding that behind a promise would make the fake

@@ -16,15 +16,24 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { INPUT_TYPES, LINK_KINDS, type InputType, type LinkKind } from './interface.ts';
+import { INPUT_TYPES, LINK_KINDS, CONCLUSION_KINDS, CONCLUSION_RELATIONS, CONCLUSION_TIERS } from './interface.ts';
+import type { ConclusionKind, ConclusionRelation, ConclusionTier, InputType, LinkKind } from './interface.ts';
 import { orderedPair } from './linking.ts';
 import type {
   DropStore,
   ExtractOutcome,
+  MatterDrop,
+  MatterGrowth,
+  NewConclusion,
   NewLink,
+  NewMatter,
+  RecordedReading,
+  StoredConclusion,
   StoredDrop,
   StoredItem,
   StoredLink,
+  StoredMatter,
+  StoredSettlement,
   StoredTerm,
   TermVector,
 } from './storage.ts';
@@ -68,14 +77,28 @@ import type {
  * `vector` is the term's embedding as JSON, or NULL when nothing has needed to
  * compare it yet. Embedding is deferred until there is something to compare
  * against, which is why NULL is the ordinary state for the first term ever said.
+ *
+ * Ticket 05 adds four: what a drop is *about* (`drop_.anchor_term_id`), the
+ * accumulation itself (`matter_` with its support and its member drops), what it
+ * settled into (`conclusion_` with its support), and how far the invisible
+ * settling has got (`settle_state_`, one row by construction).
+ *
+ * Two of those tables exist because the decisions in them are **inferences the
+ * domain makes once**: which fragments are the same matter, and what a matter
+ * settled into. They are written when the decision is made and never recomputed,
+ * which is what keeps "changing a value affects only what happens next" true.
+ * Their keys cascade so ticket 09's deletion leaves no orphan behind: deleting a
+ * drop takes its place in a matter, and deleting the term a matter was opened
+ * around takes the matter and every conclusion that came out of it.
  */
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS drop_ (
-  id         TEXT PRIMARY KEY,
-  body       TEXT NOT NULL,
-  dropped_at TEXT NOT NULL,
-  input_type TEXT,
-  reply      TEXT NOT NULL
+  id             TEXT PRIMARY KEY,
+  body           TEXT NOT NULL,
+  dropped_at     TEXT NOT NULL,
+  input_type     TEXT,
+  reply          TEXT NOT NULL,
+  anchor_term_id TEXT REFERENCES term_(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS item_ (
@@ -115,6 +138,66 @@ CREATE TABLE IF NOT EXISTS link_ (
 
 CREATE INDEX IF NOT EXISTS link_by_a ON link_ (a_term_id);
 CREATE INDEX IF NOT EXISTS link_by_b ON link_ (b_term_id);
+
+CREATE TABLE IF NOT EXISTS matter_ (
+  id             TEXT PRIMARY KEY,
+  anchor_term_id TEXT NOT NULL REFERENCES term_(id) ON DELETE CASCADE,
+  first_at       TEXT NOT NULL,
+  last_at        TEXT NOT NULL,
+  raised_count   INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS matter_term_ (
+  matter_id TEXT NOT NULL REFERENCES matter_(id) ON DELETE CASCADE,
+  term_id   TEXT NOT NULL REFERENCES term_(id) ON DELETE CASCADE,
+  position  INTEGER NOT NULL,
+  PRIMARY KEY (matter_id, term_id)
+);
+
+CREATE INDEX IF NOT EXISTS matter_term_by_term ON matter_term_ (term_id);
+
+CREATE TABLE IF NOT EXISTS matter_drop_ (
+  drop_id        TEXT PRIMARY KEY REFERENCES drop_(id) ON DELETE CASCADE,
+  matter_id      TEXT NOT NULL REFERENCES matter_(id) ON DELETE CASCADE,
+  anchor_term_id TEXT REFERENCES term_(id) ON DELETE SET NULL,
+  at             TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS matter_drop_by_matter ON matter_drop_ (matter_id);
+
+CREATE TABLE IF NOT EXISTS conclusion_ (
+  id           TEXT PRIMARY KEY,
+  matter_id    TEXT NOT NULL REFERENCES matter_(id) ON DELETE CASCADE,
+  text         TEXT NOT NULL,
+  kind         TEXT NOT NULL,
+  tier         TEXT,
+  relation     TEXT NOT NULL,
+  supersedes   TEXT REFERENCES conclusion_(id) ON DELETE SET NULL,
+  created_at   TEXT NOT NULL,
+  mentions     INTEGER NOT NULL,
+  span_days    INTEGER NOT NULL,
+  avg_strength REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS conclusion_by_matter ON conclusion_ (matter_id);
+
+CREATE TABLE IF NOT EXISTS conclusion_support_ (
+  conclusion_id TEXT NOT NULL REFERENCES conclusion_(id) ON DELETE CASCADE,
+  term_id       TEXT NOT NULL REFERENCES term_(id) ON DELETE CASCADE,
+  position      INTEGER NOT NULL,
+  PRIMARY KEY (conclusion_id, term_id)
+);
+
+CREATE INDEX IF NOT EXISTS conclusion_support_by_term ON conclusion_support_ (term_id);
+
+CREATE TABLE IF NOT EXISTS settle_state_ (
+  id            INTEGER PRIMARY KEY CHECK (id = 1),
+  drops_since   INTEGER NOT NULL,
+  look_now_next INTEGER NOT NULL
+);
+
+INSERT OR IGNORE INTO settle_state_ (id, drops_since, look_now_next)
+VALUES (1, 0, 1);
 `;
 
 /** A row as SQLite hands it back. */
@@ -124,6 +207,57 @@ interface DropRow {
   readonly dropped_at: string;
   readonly input_type: string | null;
   readonly reply: string | null;
+  readonly anchor_term_id: string | null;
+}
+
+/** A matter row as SQLite hands it back. */
+interface MatterRow {
+  readonly id: string;
+  readonly anchor_term_id: string;
+  readonly first_at: string;
+  readonly last_at: string;
+  readonly raised_count: number;
+}
+
+/** One row of a matter's support. */
+interface MatterTermRow {
+  readonly matter_id: string;
+  readonly term_id: string;
+}
+
+/** One drop that fed a matter. */
+interface MatterDropRow {
+  readonly matter_id: string;
+  readonly drop_id: string;
+  readonly anchor_term_id: string | null;
+  readonly at: string;
+}
+
+/** A conclusion row as SQLite hands it back. */
+interface ConclusionRow {
+  readonly id: string;
+  readonly matter_id: string;
+  readonly text: string;
+  readonly kind: string;
+  readonly tier: string | null;
+  readonly relation: string;
+  readonly supersedes: string | null;
+  readonly created_at: string;
+  readonly mentions: number;
+  readonly span_days: number;
+  readonly avg_strength: number;
+}
+
+/** One row of a conclusion's support. */
+interface ConclusionSupportRow {
+  readonly conclusion_id: string;
+  readonly term_id: string;
+}
+
+/** The settlement state row. */
+interface SettlementRow {
+  readonly drops_since: number;
+  readonly look_now_next: number;
 }
 
 /** An item row as SQLite hands it back. */
@@ -176,6 +310,7 @@ function toStoredDrop(row: DropRow): StoredDrop {
     body: row.body,
     droppedAt: row.dropped_at,
     inputType: readInputType(row.input_type),
+    anchorTermId: row.anchor_term_id,
     reply: row.reply,
   };
 }
@@ -233,6 +368,51 @@ function toStoredLink(row: LinkRow): StoredLink | null {
 }
 
 /**
+ * Read a stored conclusion back, or null when a value cannot be named.
+ *
+ * Null rather than a made-up reading, for the same reason as `readInputType`:
+ * these columns are written only by this adapter, so a value it does not know
+ * means the file was written by a newer version or edited by hand. For a
+ * conclusion the choice is between showing the user something the domain cannot
+ * describe — a band nobody can explain, a claim that might be a catch — and not
+ * showing it; not showing it is the honest half of that pair.
+ */
+function toStoredConclusion(
+  row: ConclusionRow,
+  supportTermIds: readonly string[],
+): StoredConclusion | null {
+  const kind = CONCLUSION_KINDS.find((known): known is ConclusionKind => known === row.kind);
+  const relation = CONCLUSION_RELATIONS.find(
+    (known): known is ConclusionRelation => known === row.relation,
+  );
+  if (kind === undefined || relation === undefined) return null;
+
+  // A null tier is ordinary — a catch asserts nothing, so there is no band for
+  // it to be in — while an unrecognised one is not something to invent.
+  let tier: ConclusionTier | null = null;
+  if (row.tier !== null) {
+    const known = CONCLUSION_TIERS.find((candidate) => candidate === row.tier);
+    if (known === undefined) return null;
+    tier = known;
+  }
+
+  return {
+    id: row.id,
+    matterId: row.matter_id,
+    text: row.text,
+    kind,
+    tier,
+    relation,
+    supersedes: row.supersedes,
+    createdAt: row.created_at,
+    mentions: row.mentions,
+    spanDays: row.span_days,
+    averageStrength: row.avg_strength,
+    supportTermIds,
+  };
+}
+
+/**
  * Add a column to an existing table when it is missing.
  *
  * `CREATE TABLE IF NOT EXISTS` does nothing to a table that already exists, so
@@ -272,15 +452,20 @@ export function openSqliteStore(file: string): DropStore {
   ensureColumn(db, 'drop_', 'input_type', 'TEXT');
   // Ticket 03's column, for a file written by tickets 01 or 02.
   ensureColumn(db, 'drop_', 'reply', 'TEXT');
+  // Ticket 05's column, for a file written by tickets 01–04. The reference is
+  // carried here too so a migrated file behaves like a fresh one: deleting the
+  // term a drop was about leaves the drop, with nothing to accumulate around.
+  ensureColumn(db, 'drop_', 'anchor_term_id', 'TEXT REFERENCES term_(id) ON DELETE SET NULL');
 
   const insertDrop = db.prepare('INSERT INTO drop_ (id, body, dropped_at, reply) VALUES (?, ?, ?, ?)');
   const selectDrops = db.prepare(
-    'SELECT id, body, dropped_at, input_type, reply FROM drop_ ORDER BY dropped_at ASC, rowid ASC',
+    'SELECT id, body, dropped_at, input_type, reply, anchor_term_id FROM drop_ ORDER BY dropped_at ASC, rowid ASC',
   );
   const selectDrop = db.prepare(
-    'SELECT id, body, dropped_at, input_type, reply FROM drop_ WHERE id = ?',
+    'SELECT id, body, dropped_at, input_type, reply, anchor_term_id FROM drop_ WHERE id = ?',
   );
   const setInputType = db.prepare('UPDATE drop_ SET input_type = ? WHERE id = ?');
+  const setAnchor = db.prepare('UPDATE drop_ SET anchor_term_id = ? WHERE id = ?');
   const setReply = db.prepare('UPDATE drop_ SET reply = ? WHERE id = ?');
   const deleteItemsForDrop = db.prepare('DELETE FROM item_ WHERE drop_id = ?');
   const insertItem = db.prepare(
@@ -333,13 +518,128 @@ export function openSqliteStore(file: string): DropStore {
     'SELECT id, a_term_id, b_term_id, kind, strength, reason FROM link_ ORDER BY rowid ASC',
   );
 
+  // Ticket 05's statements. The matter's support and membership are read whole
+  // and grouped in memory, the same way drops' items and terms are: the page's
+  // reads are per load, not per row.
+  const insertMatter = db.prepare(
+    'INSERT INTO matter_ (id, anchor_term_id, first_at, last_at, raised_count) VALUES (?, ?, ?, ?, ?)',
+  );
+  const selectMatters = db.prepare(
+    `SELECT id, anchor_term_id, first_at, last_at, raised_count
+       FROM matter_ ORDER BY first_at ASC, rowid ASC`,
+  );
+  const selectMatterTerms = db.prepare(
+    'SELECT matter_id, term_id FROM matter_term_ ORDER BY matter_id ASC, position ASC',
+  );
+  const selectMatterDrops = db.prepare(
+    `SELECT matter_id, drop_id, anchor_term_id, at
+       FROM matter_drop_ ORDER BY at ASC, rowid ASC`,
+  );
+  const countMatterTerms = db.prepare(
+    'SELECT COUNT(*) AS count FROM matter_term_ WHERE matter_id = ?',
+  );
+  const insertMatterTerm = db.prepare(
+    `INSERT INTO matter_term_ (matter_id, term_id, position) VALUES (?, ?, ?)
+     ON CONFLICT DO NOTHING`,
+  );
+  const insertMatterDrop = db.prepare(
+    `INSERT INTO matter_drop_ (drop_id, matter_id, anchor_term_id, at) VALUES (?, ?, ?, ?)
+     ON CONFLICT(drop_id) DO NOTHING`,
+  );
+  const growMatterRow = db.prepare(
+    'UPDATE matter_ SET raised_count = raised_count + 1, last_at = ? WHERE id = ?',
+  );
+  const selectMatterForDrop = db.prepare('SELECT matter_id FROM matter_drop_ WHERE drop_id = ?');
+
+  const insertConclusion = db.prepare(
+    `INSERT INTO conclusion_
+       (id, matter_id, text, kind, tier, relation, supersedes, created_at, mentions, span_days, avg_strength)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const selectConclusions = db.prepare(
+    `SELECT id, matter_id, text, kind, tier, relation, supersedes, created_at, mentions, span_days, avg_strength
+       FROM conclusion_ ORDER BY created_at ASC, rowid ASC`,
+  );
+  const selectConclusionSupport = db.prepare(
+    'SELECT conclusion_id, term_id FROM conclusion_support_ ORDER BY conclusion_id ASC, position ASC',
+  );
+  const insertConclusionSupport = db.prepare(
+    `INSERT INTO conclusion_support_ (conclusion_id, term_id, position) VALUES (?, ?, ?)
+     ON CONFLICT DO NOTHING`,
+  );
+
+  const selectSettlement = db.prepare(
+    'SELECT drops_since, look_now_next FROM settle_state_ WHERE id = 1',
+  );
+  const noteAttachmentRow = db.prepare(
+    'UPDATE settle_state_ SET drops_since = drops_since + 1 WHERE id = 1',
+  );
+  const setLookNowNextRow = db.prepare('UPDATE settle_state_ SET look_now_next = ? WHERE id = 1');
+  const resetPileRow = db.prepare('UPDATE settle_state_ SET drops_since = 0 WHERE id = 1');
+
+  /** Read the one settlement row, or the state a database without one means. */
+  function readSettlementRow(): StoredSettlement {
+    const row = selectSettlement.get() as unknown as SettlementRow | undefined;
+    // The schema inserts the row on open, so a missing one means a hand-edited
+    // file. "Nothing has piled up, and the next crossing looks now" is the state
+    // a fresh product is in, which is the safe reading for it.
+    if (row === undefined) return { dropsSince: 0, lookNowNext: true };
+    return {
+      dropsSince: row.drops_since,
+      lookNowNext: row.look_now_next !== 0,
+    };
+  }
+
+  /** A matter's support, grouped by matter, in the order it was first said. */
+  function supportByMatter(): ReadonlyMap<string, string[]> {
+    const rows = selectMatterTerms.all() as unknown as MatterTermRow[];
+    const grouped = new Map<string, string[]>();
+    for (const row of rows) {
+      const bucket = grouped.get(row.matter_id);
+      if (bucket === undefined) grouped.set(row.matter_id, [row.term_id]);
+      else bucket.push(row.term_id);
+    }
+    return grouped;
+  }
+
+  /** The drops that fed each matter, oldest first. */
+  function dropsByMatter(): ReadonlyMap<string, MatterDrop[]> {
+    const rows = selectMatterDrops.all() as unknown as MatterDropRow[];
+    const grouped = new Map<string, MatterDrop[]>();
+    for (const row of rows) {
+      const mention: MatterDrop = {
+        dropId: row.drop_id,
+        anchorTermId: row.anchor_term_id,
+        at: row.at,
+      };
+      const bucket = grouped.get(row.matter_id);
+      if (bucket === undefined) grouped.set(row.matter_id, [mention]);
+      else bucket.push(mention);
+    }
+    return grouped;
+  }
+
+  /** A conclusion's support, grouped by conclusion, in the order it was said. */
+  function supportByConclusion(): ReadonlyMap<string, string[]> {
+    const rows = selectConclusionSupport.all() as unknown as ConclusionSupportRow[];
+    const grouped = new Map<string, string[]>();
+    for (const row of rows) {
+      const bucket = grouped.get(row.conclusion_id);
+      if (bucket === undefined) grouped.set(row.conclusion_id, [row.term_id]);
+      else bucket.push(row.term_id);
+    }
+    return grouped;
+  }
+
   return {
-    async appendDrop(body: string, reply: string): Promise<StoredDrop> {
+    async appendDrop(body: string, reply: string, at: string): Promise<StoredDrop> {
       const stored: StoredDrop = {
         id: randomUUID(),
         body,
-        droppedAt: new Date().toISOString(),
+        droppedAt: at,
         inputType: null,
+        // Nothing has been read out of it yet, so nothing says what it is about.
+        anchorTermId: null,
         reply,
       };
       insertDrop.run(stored.id, stored.body, stored.droppedAt, reply);
@@ -350,8 +650,12 @@ export function openSqliteStore(file: string): DropStore {
       setReply.run(reply, dropId);
     },
 
-    async recordExtraction(dropId: string, outcome: ExtractOutcome): Promise<readonly StoredTerm[]> {
-      const saidAt = new Date().toISOString();
+    async recordExtraction(
+      dropId: string,
+      outcome: ExtractOutcome,
+      at: string,
+    ): Promise<RecordedReading> {
+      const saidAt = at;
 
       // One transaction, because this writes several kinds of row that only mean
       // something together: a drop marked as read with half its terms written is
@@ -392,8 +696,17 @@ export function openSqliteStore(file: string): DropStore {
           said.push(toStoredTerm(row));
         }
 
+        // What the drop is *about*, if anything. Resolved against the terms this
+        // drop actually said rather than trusted as a string: an anchor naming
+        // something the reading did not list is a reading that contradicts
+        // itself, and the honest record of that is "no anchor" — inventing a term
+        // the user never said would be worse than losing one reading.
+        const anchorText = outcome.anchor?.trim() ?? '';
+        const anchor = said.find((term) => term.text === anchorText);
+        setAnchor.run(anchor?.id ?? null, dropId);
+
         db.exec('COMMIT');
-        return said;
+        return { terms: said, anchorTermId: anchor?.id ?? null };
       } catch (error) {
         db.exec('ROLLBACK');
         throw error;
@@ -440,6 +753,137 @@ export function openSqliteStore(file: string): DropStore {
         const [a, b] = orderedPair(link.fromTermId, link.toTermId);
         upsertLink.run(randomUUID(), a, b, link.kind, link.strength, link.reason);
       }
+    },
+
+    async listMatters(): Promise<readonly StoredMatter[]> {
+      const rows = selectMatters.all() as unknown as MatterRow[];
+      const support = supportByMatter();
+      const drops = dropsByMatter();
+      return rows.map((row) => ({
+        id: row.id,
+        anchorTermId: row.anchor_term_id,
+        firstAt: row.first_at,
+        lastAt: row.last_at,
+        raisedCount: row.raised_count,
+        supportTermIds: support.get(row.id) ?? [],
+        drops: drops.get(row.id) ?? [],
+      }));
+    },
+
+    async openMatter(matter: NewMatter): Promise<StoredMatter> {
+      const id = randomUUID();
+      db.exec('BEGIN');
+      try {
+        insertMatter.run(id, matter.anchorTermId, matter.at, matter.at, 1);
+        for (const [position, termId] of matter.termIds.entries()) {
+          insertMatterTerm.run(id, termId, position);
+        }
+        insertMatterDrop.run(matter.dropId, id, matter.anchorTermId, matter.at);
+        db.exec('COMMIT');
+      } catch (error) {
+        db.exec('ROLLBACK');
+        throw error;
+      }
+      const support = supportByMatter().get(id) ?? [];
+      return {
+        id,
+        anchorTermId: matter.anchorTermId,
+        firstAt: matter.at,
+        lastAt: matter.at,
+        raisedCount: 1,
+        supportTermIds: support,
+        drops: [{ dropId: matter.dropId, anchorTermId: matter.anchorTermId, at: matter.at }],
+      };
+    },
+
+    async growMatter(growth: MatterGrowth): Promise<void> {
+      db.exec('BEGIN');
+      try {
+        // The drop's membership is claimed first, and a drop that is already a
+        // member stops here: the raised count is the threshold's unit, and a
+        // re-run that counted the same fragment twice would lower it. The
+        // `ON CONFLICT` makes that claim atomic with the rest of the write.
+        const claimed = insertMatterDrop.run(
+          growth.dropId,
+          growth.matterId,
+          growth.anchorTermId,
+          growth.at,
+        );
+        if (claimed.changes === 0) {
+          db.exec('COMMIT');
+          return;
+        }
+        let position = (countMatterTerms.get(growth.matterId) as unknown as { count: number }).count;
+        for (const termId of growth.termIds) {
+          insertMatterTerm.run(growth.matterId, termId, position);
+          position += 1;
+        }
+        growMatterRow.run(growth.at, growth.matterId);
+        db.exec('COMMIT');
+      } catch (error) {
+        db.exec('ROLLBACK');
+        throw error;
+      }
+    },
+
+    async matterForDrop(dropId: string): Promise<string | null> {
+      const row = selectMatterForDrop.get(dropId) as unknown as { matter_id: string } | undefined;
+      return row?.matter_id ?? null;
+    },
+
+    async listConclusions(): Promise<readonly StoredConclusion[]> {
+      const rows = selectConclusions.all() as unknown as ConclusionRow[];
+      const support = supportByConclusion();
+      return rows
+        .map((row) => toStoredConclusion(row, support.get(row.id) ?? []))
+        .filter((conclusion): conclusion is StoredConclusion => conclusion !== null);
+    },
+
+    async appendConclusion(conclusion: NewConclusion): Promise<StoredConclusion> {
+      const id = randomUUID();
+      db.exec('BEGIN');
+      try {
+        insertConclusion.run(
+          id,
+          conclusion.matterId,
+          conclusion.text,
+          conclusion.kind,
+          conclusion.tier,
+          conclusion.relation,
+          conclusion.supersedes,
+          conclusion.createdAt,
+          conclusion.mentions,
+          conclusion.spanDays,
+          conclusion.averageStrength,
+        );
+        // In the order they were said: that order is what the page shows, and a
+        // support list that reordered itself between reads could not be compared
+        // with the material it came from.
+        for (const [position, termId] of conclusion.supportTermIds.entries()) {
+          insertConclusionSupport.run(id, termId, position);
+        }
+        db.exec('COMMIT');
+      } catch (error) {
+        db.exec('ROLLBACK');
+        throw error;
+      }
+      return { ...conclusion, id };
+    },
+
+    async readSettlement(): Promise<StoredSettlement> {
+      return readSettlementRow();
+    },
+
+    async noteAttachment(): Promise<void> {
+      noteAttachmentRow.run();
+    },
+
+    async setLookNowNext(lookNowNext: boolean): Promise<void> {
+      setLookNowNextRow.run(lookNowNext ? 1 : 0);
+    },
+
+    async resetPile(): Promise<void> {
+      resetPileRow.run();
     },
 
     async listDrops(): Promise<readonly StoredDrop[]> {

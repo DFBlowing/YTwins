@@ -26,16 +26,43 @@
  * — and they are held twice over: the provider is told them, and the reply that
  * comes back is checked against them before the user ever sees it.
  *
+ * Ticket 05 gives the accumulation its **conclusion**. Everything above is about
+ * what the user said; this is the first thing the product works out on its own,
+ * and it is where the product's hardest constraint shows up in code: a
+ * conclusion is a **judgement**, so whether it may be said at all, how firmly it
+ * may be said, and what it is allowed to follow are all read off counts and
+ * spans (`conclusions.ts`) rather than asked of a model. What a model is asked
+ * for is the sentence — and silence is a legitimate answer to that question,
+ * because a conclusion nobody could compose must never become a worse one.
+ *
  * @module domain/core
  */
 
 import type { AiProvider, ExtractResult } from './ai-provider.ts';
+import {
+  CONCLUSION_INSTRUCTIONS,
+  DEFAULT_CONCLUSION_POLICY,
+  checkConclusion,
+  frameFor,
+  mayClaim,
+  overlapOf,
+  spanDays,
+  spreadWeight,
+  tierOf,
+  type ConclusionPolicy,
+} from './conclusions.ts';
 import type {
+  Conclusion,
+  ConclusionKind,
+  ConclusionRef,
+  ConclusionRelation,
+  ConclusionTier,
   Domain,
   DropResult,
   DropSummary,
   Item,
   LinkedTerm,
+  NamedTerm,
   RecallOptions,
   RecallResult,
   RecallSource,
@@ -54,16 +81,36 @@ import {
 } from './linking.ts';
 import {
   REPLY_INSTRUCTIONS,
+  SAFE_CATCH_REPLY,
   briefFor,
   checkReply,
   readSituation,
   safeReply,
   type ReplySituation,
 } from './parent-voice.ts';
-import type { DropStore, NewLink, StoredDrop, StoredItem, StoredTerm } from './storage.ts';
+import type {
+  DropStore,
+  NewLink,
+  RecordedReading,
+  StoredConclusion,
+  StoredDrop,
+  StoredItem,
+  StoredMatter,
+  StoredTerm,
+} from './storage.ts';
 
 /** How many times a provider is asked to answer one drop. One attempt, one retry. */
 const REPLY_ATTEMPTS = 2;
+
+/**
+ * How many times a provider is asked to put a matter into a sentence.
+ *
+ * The same shape as `REPLY_ATTEMPTS`, for the same reason: a sentence that broke
+ * a rule is asked for once more, told what it broke. A second failure is not a
+ * third attempt — the matter simply has not been spoken about yet, and the next
+ * look may do better.
+ */
+const CONCLUSION_ATTEMPTS = 2;
 
 /**
  * The line code itself can vouch for, for a drop it has only the text of.
@@ -92,6 +139,30 @@ export interface DomainCoreOptions {
    * different rule would have produced. Defaults to `DEFAULT_LINK_POLICY`.
    */
   readonly linkPolicy?: LinkPolicy;
+  /**
+   * When a matter may be spoken about, and how firmly.
+   *
+   * The same shape as `linkPolicy` and for the same reasons: every number here
+   * is a value the prototype calibrated rather than a finding, so a caller has
+   * to be able to pin a different one — which is also how the debounce is
+   * checkable without racing a real clock. Defaults to
+   * `DEFAULT_CONCLUSION_POLICY`.
+   */
+  readonly conclusionPolicy?: ConclusionPolicy;
+  /**
+   * The moment the domain is working from, as an ISO-8601 string.
+   *
+   * The domain owns time rather than the store, because time is part of what it
+   * decides: a matter's span is read off these moments, and so is a conclusion's
+   * place in the chain. Everything that is stamped goes through here — a drop's
+   * arrival, a reading, a conclusion — so the moments cannot come from two
+   * clocks that disagree.
+   *
+   * Injectable for the same reason every other value here is: a span of days is
+   * a rule this product decides on, and a check that had to wait for one would
+   * not be a check. Defaults to the real present.
+   */
+  readonly now?: () => string;
 }
 
 /** What a drop caught, assembled for the interface. */
@@ -136,8 +207,86 @@ function toTerm(stored: StoredTerm): Term {
   };
 }
 
-function toLinkedTerm(stored: StoredTerm): LinkedTerm {
+/**
+ * Present a stored term as something that may be named without its vector.
+ *
+ * One helper for both places a term is named on the way out — a link's end and a
+ * conclusion's support — because `LinkedTerm` and `NamedTerm` are the same shape,
+ * and two spellings of "the id and the wording, and nothing else" would drift.
+ */
+function toNamedTerm(stored: StoredTerm): NamedTerm {
   return { id: stored.id, text: stored.text };
+}
+
+/**
+ * Which terms each matter has already spoken about.
+ *
+ * Derived from the conclusions rather than stored beside the matter, because
+ * they are the same fact: a term is "concluded" when it appears in the support
+ * of a conclusion that came out of the matter. Storing it as well would be two
+ * records that could disagree — and the one that drifted would silently let the
+ * same evidence produce the same conclusion twice.
+ *
+ * @param conclusions - every stored conclusion, oldest first.
+ * @returns the terms concluded per matter.
+ */
+function concludedSupport(
+  conclusions: readonly StoredConclusion[],
+): ReadonlyMap<string, ReadonlySet<string>> {
+  const grouped = new Map<string, Set<string>>();
+  for (const conclusion of conclusions) {
+    const already = grouped.get(conclusion.matterId) ?? new Set<string>();
+    for (const termId of conclusion.supportTermIds) already.add(termId);
+    grouped.set(conclusion.matterId, already);
+  }
+  return grouped;
+}
+
+/**
+ * How tightly a matter's support connects to the feeling it is about.
+ *
+ * The strong band's third gate, and the only one that looks at the links: a
+ * matter held together by six terms that all arrived in the same breath with the
+ * feeling is stronger evidence than six terms that happen to have been said
+ * around it. A term with no direct link counts zero, which is what makes the
+ * average fall rather than being skipped.
+ *
+ * @param supportTermIds - every term supporting the matter.
+ * @param anchorTermId - the feeling the matter was opened around.
+ * @param linkStrength - every link's strength, by pair key.
+ * @returns the average, 0 to 1; a matter with only its anchor counts as 1.
+ */
+function averageStrengthToAnchor(
+  supportTermIds: readonly string[],
+  anchorTermId: string,
+  linkStrength: ReadonlyMap<string, number>,
+): number {
+  const others = supportTermIds.filter((termId) => termId !== anchorTermId);
+  if (others.length === 0) return 1;
+  const total = others.reduce(
+    (sum, termId) => sum + (linkStrength.get(pairKey(termId, anchorTermId)) ?? 0),
+    0,
+  );
+  return total / others.length;
+}
+
+/**
+ * The newest drop in a matter that brought a feeling or a decision.
+ *
+ * What the sentence has to follow: a matter that began with 「好烦」 and last
+ * carried 「松了口气」 is about someone who has since relaxed, and a sentence
+ * written from the opening word describes a person who is no longer there. The
+ * author measured this the hard way — see ticket 05's `## Comments`.
+ *
+ * @param matter - the matter, whose member drops are oldest first.
+ * @returns the newest mention with an anchor, or null when none has one.
+ */
+function newestFeeling(matter: StoredMatter): StoredMatter['drops'][number] | null {
+  for (let index = matter.drops.length - 1; index >= 0; index -= 1) {
+    const mention = matter.drops[index];
+    if (mention !== undefined && mention.anchorTermId !== null) return mention;
+  }
+  return null;
 }
 
 /**
@@ -149,6 +298,50 @@ function toLinkedTerm(stored: StoredTerm): LinkedTerm {
 export function createDomain(options: DomainCoreOptions): Domain {
   const { store, provider } = options;
   const linkPolicy = options.linkPolicy ?? DEFAULT_LINK_POLICY;
+  const conclusionPolicy = options.conclusionPolicy ?? DEFAULT_CONCLUSION_POLICY;
+  const now = options.now ?? ((): string => new Date().toISOString());
+
+  /**
+   * Every decision about a look, and every look itself, runs through here.
+   *
+   * One queue for both, and the reason is this file's trickiest ordering
+   * problem: reads are asynchronous, so a burst of drops each decides after
+   * *all* of them have been read. Racing decisions would each see the same
+   * crossing and each spend the alternation's turn — three fragments typed in a
+   * row would look like a rhythm of three, and the turn would be back where it
+   * started by the time the next crossing arrived. Chaining a decision behind
+   * the look before it means each one reads the state the last one left: a
+   * crossing already spoken about is gone, and one deliberately left to the
+   * quiet window is not reconsidered by the next drop of the same pile.
+   *
+   * What that costs is worth naming: a look may ask a model for a sentence, so a
+   * provider that never answers stalls everything queued behind it, later looks
+   * included. Nothing is lost — the pile and the material are still there — but
+   * the settling waits for the provider rather than giving up on it, which is
+   * what "the look waits for the sentence it asked for" means.
+   */
+  let lookQueue: Promise<void> = Promise.resolve();
+
+  /** Queue one step of the invisible settling behind whatever is already queued. */
+  function queueLook(step: () => Promise<void>): Promise<void> {
+    lookQueue = lookQueue.then(step).catch(() => {});
+    return lookQueue;
+  }
+
+  /**
+   * Every accumulation runs through here, one at a time and in arrival order.
+   *
+   * A look may ask a model for a sentence and hang; an accumulation may not, and
+   * it must not queue behind one — hence two queues rather than one. What the
+   * separate queue buys is what accumulation cannot do without: each drop
+   * attaches to the material **the drop before it left behind**, so a burst of
+   * fragments whose readings are still landing cannot each decide, from the same
+   * empty state, to open a matter of its own.
+   */
+  let accumulationQueue: Promise<void> = Promise.resolve();
+
+  /** The timer that carries "wait for it to go quiet" without anyone watching. */
+  let quietTimer: ReturnType<typeof setTimeout> | null = null;
 
   /**
    * Read one drop, and write down what was read.
@@ -179,13 +372,18 @@ export function createDomain(options: DomainCoreOptions): Domain {
       return;
     }
 
-    let said: readonly StoredTerm[];
+    let recorded: RecordedReading;
     try {
-      said = await store.recordExtraction(drop.id, {
-        inputType: reading.inputType,
-        items: reading.items,
-        terms: reading.terms,
-      });
+      recorded = await store.recordExtraction(
+        drop.id,
+        {
+          inputType: reading.inputType,
+          items: reading.items,
+          terms: reading.terms,
+          anchor: reading.anchor,
+        },
+        now(),
+      );
     } catch {
       // The provider answered but the write failed. Swallowing this keeps the
       // port's promise that extraction never rejects, and leaves the drop
@@ -193,6 +391,13 @@ export function createDomain(options: DomainCoreOptions): Domain {
       // the store writes items, terms and the links between them in one step.
       return;
     }
+
+    // What was read, as the store resolved it: terms carry their identities and
+    // the anchor is either one of them or nothing. Read from the result rather
+    // than from `drop`, whose row was captured before the reading landed — its
+    // anchor is still empty, and that is exactly the kind of stale field a later
+    // step would believe.
+    const said = recorded.terms;
 
     // The zero-model half of linking: the terms the user said together. Written
     // here rather than by the store because it is the product's rule and its
@@ -204,6 +409,28 @@ export function createDomain(options: DomainCoreOptions): Domain {
     // own time. A drop whose terms were read is a success whether or not
     // anything could be compared.
     void linkInto(said);
+
+    // Settling. The drop is attached to the material first — that is the
+    // inference, and it is written down — and only then is the invisible look
+    // considered, so a crossing this drop caused can be spoken about in the same
+    // breath rather than one drop late.
+    //
+    // The attachment is waited for and the look is not: attaching is store-only
+    // work that must land before the look reads the material, while the look may
+    // ask a model for a sentence and a model that hangs must not hold up the
+    // reading of anything.
+    //
+    // Guarded as one step rather than left to each callee: extraction's promise
+    // that it never rejects has to hold for **every** step this function awaits.
+    // A store closed under a drop that is still being read is the ordinary way
+    // that promise gets broken, and what it costs must be the accumulation —
+    // never a rejection nobody is waiting for.
+    try {
+      await accumulate(drop, said, recorded.anchorTermId);
+      void considerLook();
+    } catch {
+      // Swallowed: the terms, the links and the drop itself are already stored.
+    }
   }
 
   /**
@@ -272,6 +499,19 @@ export function createDomain(options: DomainCoreOptions): Domain {
    * been", which is a state the product is designed to tolerate.
    */
   async function linkInto(said: readonly StoredTerm[]): Promise<void> {
+    // One outer guard, because the promise this keeps is about the *function*:
+    // every failure ends in "fewer links than there could have been". The steps
+    // inside guard their own provider and write failures for legibility, but a
+    // store that went away mid-read is not one of those steps, and a rejection
+    // nobody awaits would take the process down with it.
+    try {
+      await linkTerms(said);
+    } catch {
+      // Swallowed on purpose: see `linkTerms`' failures, all of which cost links.
+    }
+  }
+
+  async function linkTerms(said: readonly StoredTerm[]): Promise<void> {
     if (provider === undefined) return;
     if (said.length === 0) return;
 
@@ -396,6 +636,368 @@ export function createDomain(options: DomainCoreOptions): Domain {
     }
   }
 
+  /**
+   * Attach one drop's terms to the material already there.
+   *
+   * The inference this makes is "which matter was that about?", and it is made
+   * once, here, at the drop — then written down. It is deliberately not
+   * recomputed later: the same reading under a later `ConclusionPolicy` would
+   * split or merge matters the user's portrait was built from, and the promise
+   * is that changing a value affects what happens next.
+   *
+   * Two ways a drop joins the accumulation, and one way it does not:
+   *
+   *  - It covers enough of a matter to be about it (`overlapRatio`, measured
+   *    against the smaller side, with shared terms weighted by how widely they
+   *    are already spread — see `conclusions.ts`).
+   *  - It covers nothing, but carries a feeling or a decision, so it **opens** a
+   *    matter of its own.
+   *  - It covers nothing and carries neither — an observation, a fact, a plan
+   *    with no feeling in it. Its terms are kept and it accumulates into
+   *    nothing, because there is no "about" for a mark to attach to.
+   *
+   * Never throws: a drop that could not be attached costs an accumulation, never
+   * the drop, the terms or the links, all of which were written before this ran.
+   */
+  async function accumulate(
+    drop: StoredDrop,
+    said: readonly StoredTerm[],
+    anchorTermId: string | null,
+  ): Promise<void> {
+    const queued = accumulationQueue
+      .then(() => attach(drop, said, anchorTermId))
+      // Never rejects, so the queue can neither stall nor break: a drop that
+      // could not be attached costs an accumulation and nothing else.
+      .catch(() => {});
+    accumulationQueue = queued;
+    return queued;
+  }
+
+  async function attach(
+    drop: StoredDrop,
+    said: readonly StoredTerm[],
+    anchorTermId: string | null,
+  ): Promise<void> {
+    if (said.length === 0) return;
+    try {
+      // Already counted. Re-running extraction must converge rather than
+      // counting the same fragment twice — the raised count is the threshold's
+      // unit, and one drop counted twice would quietly lower it.
+      if ((await store.matterForDrop(drop.id)) !== null) return;
+
+      const matters = await store.listMatters();
+      const anchor = said.find((term) => term.id === anchorTermId) ?? null;
+      const saidIds = said.map((term) => term.id);
+
+      // How widely each wording is spread, measured across matters rather than
+      // mentions: a word said ten times about one thing is still specific to
+      // that thing, which is exactly the distinction the weighting is for.
+      const spread = new Map<string, number>();
+      for (const matter of matters) {
+        for (const termId of matter.supportTermIds) {
+          spread.set(termId, (spread.get(termId) ?? 0) + 1);
+        }
+      }
+      // A term the map does not mention is in no matter yet, and a wording no
+      // matter has claimed is fully specific — so the same 1 the weight gives a
+      // term said only here, rather than a missing measurement.
+      const weight = (termId: string): number =>
+        spreadWeight(spread.get(termId) ?? 0, conclusionPolicy);
+
+      let best: { matterId: string; value: number } | null = null;
+      for (const matter of matters) {
+        const value = overlapOf(saidIds, matter.supportTermIds, weight).value;
+        if (best === null || value > best.value) best = { matterId: matter.id, value };
+      }
+
+      if (best !== null && best.value >= conclusionPolicy.overlapRatio) {
+        await store.growMatter({
+          matterId: best.matterId,
+          dropId: drop.id,
+          anchorTermId: anchor?.id ?? null,
+          at: drop.droppedAt,
+          termIds: saidIds,
+        });
+        // Counted only once the drop is in the material: the pile the backstop
+        // counts is the one a look will judge.
+        await store.noteAttachment();
+        return;
+      }
+
+      // Nothing to accumulate around: the words stay, the matter does not exist.
+      if (anchor === null) return;
+      await store.openMatter({
+        dropId: drop.id,
+        anchorTermId: anchor.id,
+        at: drop.droppedAt,
+        termIds: saidIds,
+      });
+      await store.noteAttachment();
+    } catch {
+      // Swallowed on purpose, like the links: what the user said is stored, and
+      // the accumulation is the domain's reading of it.
+    }
+  }
+
+  /** Whether any matter has crossed the threshold without being spoken about yet. */
+  async function hasPendingCrossing(): Promise<boolean> {
+    const concluded = concludedSupport(await store.listConclusions());
+    return (await store.listMatters()).some(
+      (matter) =>
+        matter.raisedCount >= conclusionPolicy.threshold &&
+        matter.supportTermIds.some((termId) => !(concluded.get(matter.id)?.has(termId) ?? false)),
+    );
+  }
+
+  /**
+   * Ask the provider for a matter's sentence, and take it only if it passes.
+   *
+   * The one retry is told which rules the first attempt broke, because a model
+   * asked to try again at random is being asked to guess luckily. A second
+   * failure returns null, and null means **silence**: the matter has not been
+   * spoken about yet, and the next look may do better. There is no safe line
+   * here to fall back to — an invented sentence would be a judgement the product
+   * does not have, which is worse than saying nothing.
+   */
+  async function composeClaim(
+    anchor: string,
+    terms: readonly string[],
+    tier: ConclusionTier,
+  ): Promise<string | null> {
+    if (provider === undefined) return null;
+
+    let violations: readonly string[] | undefined;
+    for (let attempt = 0; attempt < CONCLUSION_ATTEMPTS; attempt += 1) {
+      let candidate: string;
+      try {
+        candidate = (
+          await provider.composeConclusion({
+            anchor,
+            terms,
+            tier,
+            instructions: CONCLUSION_INSTRUCTIONS,
+            ...(violations === undefined ? {} : { violations }),
+          })
+        ).text;
+      } catch {
+        return null;
+      }
+
+      const broken = checkConclusion(candidate);
+      if (broken.length === 0) return candidate;
+      violations = broken;
+    }
+    return null;
+  }
+
+  /**
+   * Look at everything that has piled up, and make the conclusions that are due.
+   *
+   * One look is one pass over every matter. Nothing is decided from what arrived
+   * since the last look — the whole accumulation is read every time — because
+   * "has this matter earned a sentence" is a question about the matter, not about
+   * the last fragment.
+   */
+  async function settle(): Promise<void> {
+    const terms = new Map((await store.listTerms()).map((term) => [term.id, term]));
+    const conclusions = await store.listConclusions();
+    const concluded = concludedSupport(conclusions);
+    const latest = new Map<string, StoredConclusion>();
+    for (const conclusion of conclusions) latest.set(conclusion.matterId, conclusion);
+
+    const linkStrength = new Map<string, number>();
+    for (const link of await store.listLinks()) {
+      linkStrength.set(pairKey(link.fromTermId, link.toTermId), link.strength);
+    }
+
+    // The moment belongs to the look, not to each conclusion: a settlement that
+    // produced two conclusions produced them together.
+    const at = now();
+
+    for (const matter of await store.listMatters()) {
+      try {
+        const fresh = matter.supportTermIds.filter(
+          (termId) => !(concluded.get(matter.id)?.has(termId) ?? false),
+        );
+        // Nothing new since the last sentence: saying it again would be a second
+        // conclusion from the same evidence, which is the one way the chain could
+        // pad itself.
+        if (fresh.length === 0) continue;
+        if (matter.raisedCount < conclusionPolicy.threshold) continue;
+
+        const anchorTerm = terms.get(matter.anchorTermId);
+        if (anchorTerm === undefined) continue;
+        const support = matter.supportTermIds
+          .map((termId) => terms.get(termId))
+          .filter((term): term is StoredTerm => term !== undefined);
+        const supportTexts = support.map((term) => term.text);
+        const days = spanDays(matter.firstAt, matter.lastAt);
+        const strength = averageStrengthToAnchor(
+          matter.supportTermIds,
+          matter.anchorTermId,
+          linkStrength,
+        );
+        const previous = latest.get(matter.id) ?? null;
+        const relation: ConclusionRelation = previous === null ? 'first' : 'inherit';
+        // Which feeling this matter is about *now*, read once and used by both
+        // branches: the sentence follows it, and the catch is the line it was
+        // already answered with.
+        const newest = newestFeeling(matter);
+
+        let text: string;
+        let kind: ConclusionKind;
+        let tier: ConclusionTier | null;
+
+        if (!mayClaim(matter.supportTermIds.length, conclusionPolicy)) {
+          // Too little to say anything about a pattern: catch the newest feeling
+          // instead, in the line that feeling was already answered with. Code's
+          // own sentence, already checked against the parent voice, and no claim
+          // in it — a catch asserts nothing, so there is nothing to be unsure
+          // about and no band for it to be in.
+          const catching = newest === null ? null : await catchLine(newest);
+          if (catching === null) continue;
+          text = catching;
+          kind = 'catch';
+          tier = null;
+        } else {
+          const newestTerm =
+            newest?.anchorTermId === null || newest === null
+              ? undefined
+              : terms.get(newest.anchorTermId);
+          const feeling = newestTerm?.text ?? anchorTerm.text;
+          const band = tierOf(matter.supportTermIds.length, days, strength, conclusionPolicy);
+          const sentence = await composeClaim(feeling, supportTexts, band);
+          // Silence rather than a worse sentence. The crossing stays pending, so
+          // the next look tries again.
+          if (sentence === null) continue;
+          text = frameFor(band, sentence);
+          kind = 'claim';
+          tier = band;
+        }
+
+        await store.appendConclusion({
+          matterId: matter.id,
+          text,
+          kind,
+          tier,
+          relation,
+          supersedes: previous?.id ?? null,
+          createdAt: at,
+          mentions: matter.raisedCount,
+          spanDays: days,
+          averageStrength: strength,
+          supportTermIds: matter.supportTermIds,
+        });
+      } catch {
+        // One matter that could not be spoken about must not stop the others,
+        // and must not lose the material: nothing was half-written, because the
+        // conclusion and its support go in together.
+      }
+    }
+
+    // The look happened, so the pile is empty — and only the pile is touched:
+    // the turn the alternation is on, and the moment the newest fragment landed,
+    // were both written by whoever decided them and are not this function's to
+    // restate.
+    await store.resetPile();
+  }
+
+  /**
+   * The line a matter may use when it has too little to claim anything.
+   *
+   * Deliberately the reply the newest feeling was answered with rather than a
+   * fresh call: that sentence already names the feeling, it has already passed
+   * the parent-voice checks, and it costs nothing. It is also the same sentence
+   * the user saw when they said it, which is what "只接住你最新说的那句" means.
+   *
+   * What it is **not** is exempt from the shape a conclusion has to keep. A reply
+   * is allowed three sentences and one question; a catch stands on the portrait
+   * where a conclusion would, and a question there would be the product asking
+   * the user something in the one place it is only supposed to be reporting. So
+   * the line is checked, and code's own shortest line stands in when it does not
+   * pass — a catch that catches nothing but presence is still a catch.
+   *
+   * @param newest - the newest mention that brought a feeling, from `newestFeeling`.
+   * @returns the line, or null when the drop it belongs to cannot be read.
+   */
+  async function catchLine(newest: StoredMatter['drops'][number]): Promise<string | null> {
+    const drop = await store.findDrop(newest.dropId);
+    if (drop === null) return null;
+    const line = drop.reply ?? safeLineFor(drop.body);
+    return checkConclusion(line).length === 0 ? line : SAFE_CATCH_REPLY;
+  }
+
+  /**
+   * Decide whether this drop deserves a look, and take it if it does.
+   *
+   * Three triggers, in the order the prototype settled them:
+   *
+   *  1. **The backstop** — enough drops have piled up that a look is forced
+   *     whether or not anything paused. It exists for someone who never stops
+   *     typing, and it is checked first so it cannot be starved by the
+   *     alternation.
+   *  2. **The count** — a matter has crossed the threshold, and the timing says
+   *     to look the moment it does.
+   *  3. **The quiet window** — the timer armed at the drop (see `armQuietWindow`)
+   *     fires once nothing has been said for long enough.
+   *
+   * Under `alternate`, the second trigger is a turn rather than a rule. The turn
+   * is spent by every crossing it is consulted about — that is what "交替" means
+   * — and written down before the look, so a restart cannot rewind it. The
+   * backstop bypasses the turn entirely.
+   *
+   * Never throws, and deliberately not awaited by its caller: a look may ask a
+   * model for a sentence, and the reading of the next drop must not wait on that.
+   */
+  function considerLook(): Promise<void> {
+    return queueLook(async () => {
+      const state = await store.readSettlement();
+      if (state.dropsSince >= conclusionPolicy.pendingLimit) {
+        // The backstop, whatever the timing says and whoever is mid-sentence.
+        await settle();
+        return;
+      }
+      if (conclusionPolicy.judgeTiming === 'quiet') return;
+      if (!(await hasPendingCrossing())) return;
+
+      if (conclusionPolicy.judgeTiming === 'count') {
+        await settle();
+        return;
+      }
+
+      // Alternating. The turn is spent either way: looking now half the time is
+      // what keeps the rhythm from becoming a rule the user can read.
+      await store.setLookNowNext(!state.lookNowNext);
+      if (state.lookNowNext) await settle();
+    });
+  }
+
+  /**
+   * Arm the quiet window, from the newest drop.
+   *
+   * Re-armed rather than counted down, because the window is measured from the
+   * newest drop and a new one restarts it — a few sentences in one sitting are
+   * one thought, and judging them mid-thought is exactly what the window is for.
+   *
+   * The timer is unref'd: a pending look must never be the reason a process
+   * stays alive. Losing it to a shutdown costs nothing, because the next drop
+   * arms it again and the pile it was going to look at is still there.
+   */
+  function armQuietWindow(): void {
+    if (quietTimer !== null) clearTimeout(quietTimer);
+    quietTimer = setTimeout(() => {
+      quietTimer = null;
+      void queueLook(async () => {
+        // Nothing to look at means nothing to do: a drop the count trigger
+        // already accounted for must not make the window look a second time.
+        const state = await store.readSettlement();
+        if (state.dropsSince === 0) return;
+        await settle();
+      });
+    }, conclusionPolicy.quietWindowMs);
+    if (typeof quietTimer.unref === 'function') quietTimer.unref();
+  }
+
   /** Assemble one drop with its items and terms, or null when there is none. */
   async function readDrop(dropId: string): Promise<DropSummary | null> {
     const drop = await store.findDrop(dropId);
@@ -478,7 +1080,19 @@ export function createDomain(options: DomainCoreOptions): Domain {
       // Record first, with the line the user is owed. The faithful original and
       // an answer to it are what make the drop a success; both are code's own,
       // and neither waits on anyone.
-      const stored = await store.appendDrop(body, safe);
+      // The moment is taken once, at the drop, and used for everything that drop
+      // causes: the row it is stored as and — through the drop it belongs to —
+      // where its terms and its matter land in time. Reading the clock again later
+      // would let a slow reading move a fragment's moment, and a span is a number
+      // this product decides on.
+      const at = now();
+      const stored = await store.appendDrop(body, safe, at);
+
+      // The quiet window is armed before anything else runs. It is a fact about
+      // *this drop arriving* rather than about what was read out of it, so it may
+      // not wait on a provider; what the drop added to the accumulation is counted
+      // later, once it has actually been attached.
+      armQuietWindow();
 
       // Read the drop in the background. This is the decision the whole product
       // is shaped around: a drop returns in the time it takes to write one row,
@@ -552,11 +1166,54 @@ export function createDomain(options: DomainCoreOptions): Domain {
           kind: link.kind,
           strength: link.strength,
           reason: link.reason,
-          from: toLinkedTerm(from),
-          to: toLinkedTerm(to),
+          from: toNamedTerm(from),
+          to: toNamedTerm(to),
         });
       }
       return links;
+    },
+
+    async listConclusions(): Promise<readonly Conclusion[]> {
+      // Read the terms once and share the map: what a conclusion needs from a
+      // term is its wording, and one read of the whole list beats a lookup per
+      // supporting term — the same trade `listLinks` makes.
+      const terms = new Map((await store.listTerms()).map((term) => [term.id, term]));
+      const stored = await store.listConclusions();
+      const byId = new Map(stored.map((conclusion) => [conclusion.id, conclusion]));
+
+      // `supersededBy` is the reverse of `supersedes`, and it is derived rather
+      // than stored: a conclusion cannot know it will be revised. It is filled
+      // in here so the chain can be read in both directions without the page
+      // having to pair the list up itself.
+      const revisedBy = new Map<string, string>();
+      for (const conclusion of stored) {
+        if (conclusion.supersedes !== null) revisedBy.set(conclusion.supersedes, conclusion.id);
+      }
+      const ref = (id: string | null | undefined): ConclusionRef | null => {
+        const found = id === null || id === undefined ? undefined : byId.get(id);
+        return found === undefined ? null : { id: found.id, text: found.text };
+      };
+
+      return stored.map((conclusion) => ({
+        id: conclusion.id,
+        text: conclusion.text,
+        kind: conclusion.kind,
+        tier: conclusion.tier,
+        relation: conclusion.relation,
+        supersedes: ref(conclusion.supersedes),
+        supersededBy: ref(revisedBy.get(conclusion.id)),
+        createdAt: conclusion.createdAt,
+        mentions: conclusion.mentions,
+        spanDays: conclusion.spanDays,
+        averageStrength: conclusion.averageStrength,
+        // A supporting term the store can no longer name is left out rather than
+        // shown as a blank: a conclusion listed with a nameless prop would be a
+        // judgement with evidence the user cannot read.
+        support: conclusion.supportTermIds
+          .map((termId) => terms.get(termId))
+          .filter((term): term is StoredTerm => term !== undefined)
+          .map(toNamedTerm),
+      }));
     },
 
     async extract(dropId: string): Promise<DropSummary | null> {

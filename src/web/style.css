@@ -287,6 +287,79 @@ body {
   white-space: nowrap;
 }
 
+/* The portrait and the conclusion chain (05). Its own section below the links,
+   because a conclusion is not about one drop either: it is what the whole
+   accumulation added up to. Read-only by design — there is nothing to press. */
+.portrait {
+  margin-top: 2.5rem;
+}
+
+.portrait-note {
+  margin: 0 0 1rem;
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+}
+
+.chain-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* Numbered by the list itself, because the chain is a sequence: which sentence
+   came before which is part of what it means. */
+.conclusion-row {
+  padding: 0.8rem 1rem;
+  border-left: 3px solid var(--accent);
+  background: #fff;
+}
+
+.conclusion-row + .conclusion-row {
+  margin-top: 0.6rem;
+}
+
+/* A catch is the substitute for a judgement, not a softer one, and it is drawn
+   without the accent so it does not read as a finding. */
+.conclusion-catch {
+  border-left-color: var(--line);
+}
+
+.conclusion-text {
+  margin: 0;
+  font-size: 1.05rem;
+  word-break: break-word;
+}
+
+.conclusion-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.9rem;
+  margin: 0.4rem 0 0;
+  font-size: 0.8rem;
+  color: var(--ink-soft);
+}
+
+.conclusion-band {
+  color: var(--accent);
+}
+
+.conclusion-why {
+  margin: 0.35rem 0 0;
+  font-size: 0.8rem;
+  color: var(--ink-soft);
+}
+
+/* What supports it: the user's own words, so the sentence above can be checked
+   against them rather than taken on trust. */
+.conclusion-support {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0.6rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
 .empty,
 .not-yet {
   color: var(--ink-soft);
