@@ -256,16 +256,25 @@ reply is"), not storage-shaped ones (no tables, no id assembly, no SQL). At mini
   scores connect, low scores do not, the **grey zone** goes to `judgeLink` or is left unconnected for now);
   (2) same-drop co-occurrence — a hard edge needing no model. Link strength is comparable and each link keeps its
   reason.
-- **Threshold assembly copies the shape of Generative Agents**: each term carries an LLM-assigned relevance score,
-  scores accumulate, and crossing the threshold produces a conclusion while storing the terms that support it.
-  **The threshold is a count threshold and its value is a tuning parameter**, carried by a configurable constant whose
+- **Threshold assembly copies the shape of Generative Agents**: crossing the threshold produces a conclusion while
+  storing the terms that support it. **The threshold is a count threshold**, carried by a configurable constant whose
   initial value is chosen so that act three of the demo reliably triggers while not every drop does.
+  > **Amended 2026-09-16 (measured by ticket 05's prototype)**: the original wording was "each term carries an
+  > LLM-assigned relevance score, and the scores accumulate". Measurement says the count is **how many times the
+  > matter has been raised** — not terms, not relevance scores — otherwise a single fragment stuffed with terms would
+  > speak more easily. The full table of values and the rubric is at the end of [`issues/05`](issues/05-conclusion-threshold-portrait-chain.md)'s
+  > `## Comments`, and `CONTEXT.md`'s 阈值 entry was rewritten to match. What is kept from Generative Agents is the
+  > *shape* (accumulate → cross the threshold → assemble a conclusion with its support); only "what accumulates" changed.
 - **Assembly is debounced**: the threshold is not evaluated after every single drop, but after "a quiet period" or
   "several accumulated drops", so that a few mutually dependent messages are not assembled into a wrong conclusion
   too early.
-- **Explainability of answers**: every answer/conclusion carries a confidence and a list of supporting terms, and
-  **wording strength is mapped from explainable numbers** (number of supporting terms, average link strength, time
-  span) rather than chosen freely by the LLM.
+- **Explainability of answers**: every answer/conclusion carries a list of supporting terms, and **wording strength is
+  mapped from explainable numbers** (number of supporting terms, average link strength, time span) rather than chosen
+  freely by the LLM.
+  > **Amended 2026-09-16 (when ticket 05 landed)**: there is no single "confidence" number — one scalar would crush
+  > three different kinds of evidence into a spuriously precise figure. What shipped is **three wording bands**
+  > (weak / medium / strong) read off those three numbers, with the numbers themselves stored beside the conclusion and
+  > readable on the page ("why it said that"), so "it can say why" still holds.
 - **Uncertain wording is a hard constraint** that applies to **answers** and **surfacings** only; it does not rewrite
   ordinary replies.
 - **The conclusion chain is append-only in effect**: marking "not true" records an overturning; the old conclusion is
