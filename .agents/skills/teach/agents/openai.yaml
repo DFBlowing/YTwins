@@ -1,5 +1,0 @@
-interface:
-  display_name: "教学"
-  short_description: "在工作区里学一个概念"
-policy:
-  allow_implicit_invocation: false

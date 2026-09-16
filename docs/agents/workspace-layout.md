@@ -42,12 +42,17 @@
 
 这些位置由 skill 硬编码解析，改动会打断主流程：
 
-`AGENTS.md`、`CLAUDE.md`、`CONTEXT.md`、`CONTEXT-MAP.md`、`.agents/skills/`、`.claude/skills`、`.git/`、
+`AGENTS.md`、`CLAUDE.md`、`CONTEXT.md`、`CONTEXT-MAP.md`、`.git/`、
 `.scratch/<effort>/spec.md`、`.scratch/<effort>/issues/<NN>-<slug>.md`、`.scratch/<effort>/map.md`、
 `docs/agents/`、`docs/adr/`
 
-**新增一层永远比移动一层便宜。** skill 是本仓库自带的（`.agents/skills/`，由 `skills-lock.json` 锁定版本），
-`.claude/skills` 只是指向它的 junction —— 两者都不许移动。
+> 本仓库 2026-09-16 起**不再自带 skill 副本**：25 个 Matt skill 的实体在中央 store
+> （`C:\Users\17624\.cc-switch\skills`），技能靠用户级根（`~/.agents/skills`、`~/.claude/skills`）加载。
+> 所以仓库里既没有 `.agents/skills/`、也没有 `skills-lock.json`、也没有 `.claude/skills` 桥接件。
+> 哪个仓库若还有这三者，它们同样是协议路径，不许移动。
+
+**新增一层永远比移动一层便宜。** 本约定加的全部是新目录（`projects/`、`archive/` 等），没有搬动任何一个
+协议路径，所以主流程零影响。
 
 ## `projects/` —— 每 effort 一份总览
 

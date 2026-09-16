@@ -1,5 +1,0 @@
-interface:
-  display_name: "初始化 skills"
-  short_description: "为仓库配置这套 skill"
-policy:
-  allow_implicit_invocation: false

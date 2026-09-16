@@ -1,7 +1,8 @@
 # Matt Skills 使用指南
 
 > 依据：官方手册 <https://www.aihero.dev/skills>、`/to-spec` 与 `/implement` 详情页，以及本机 `ask-matt/SKILL.md`（Matt 自己写的路由文档，比网页分组更权威）。
-> 本工作区已装 **25 个**，全部中文化（详见 `DSH-工作区说明.md`）。
+> 本工作区可用 **25 个**，全部中文化。实体在中央 store（`C:\Users\17624\.cc-switch\skills`），
+> 仓库里不带副本 —— 见 `AGENTS.md` 的「Skills」一节。
 
 ---
 

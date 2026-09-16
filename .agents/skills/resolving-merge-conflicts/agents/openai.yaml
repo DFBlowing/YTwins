@@ -1,3 +1,0 @@
-interface:
-  display_name: "解决合并冲突"
-  short_description: "解决 merge 与 rebase 冲突"

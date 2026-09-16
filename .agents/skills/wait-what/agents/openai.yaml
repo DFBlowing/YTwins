@@ -1,5 +1,0 @@
-interface:
-  display_name: "没听懂"
-  short_description: "用中文重新讲一遍"
-policy:
-  allow_implicit_invocation: false

@@ -1,3 +1,0 @@
-interface:
-  display_name: "代码评审"
-  short_description: "按 Standards 与 Spec 审查 diff"

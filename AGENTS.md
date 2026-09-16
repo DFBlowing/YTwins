@@ -54,19 +54,18 @@ Where each kind of material lives (`projects/` overviews, `docs/` detail, `.scra
 
 ### Skills
 
-本仓库**自带** 25 个 Matt Pocock skill，装在 `.agents/skills/`，版本由根目录的 `skills-lock.json` 锁定
-（`npx skills update` 按锁刷新）。`.claude/skills` 是指向 `.agents/skills/` 的目录 junction，供 Claude Code 使用；
-`.claude/` 不进 git。
+本仓库**不自带** skill 副本：25 个 Matt Pocock skill 的实体只有一处 —— 中央 store
+`C:\Users\17624\.cc-switch\skills`。DSH 与 Claude Code 分别通过用户级根 `~/.agents/skills`（rank 500）
+与 `~/.claude/skills` 读到它，两者都是链接层。仓库里没有 `.agents/skills/`、没有 `skills-lock.json`、
+也没有 `.claude/skills` 桥接件 —— 2026-09-16 之前有，那天三处副本一起删掉了。
 
-**加载来源要说清楚**：DSH 与 Claude Code 都从**工作区内的** `.agents/skills/` 读技能；用户主目录下的
-`~/.agents/skills` 只有 10 个非 Matt skill（obsidian / byok 那批），两者不是一回事。改 skill 只改
-`.agents/skills/` 一处，不要往 `.claude/` 里复制 SKILL.md。
+**改 skill 只改中央 store 一处**，两个 harness 同时生效；升级也只在 store 上跑一次 `npx skills update`。
+在 store 里加**新** skill 时，别忘了在 `~/.agents/skills` 与 `~/.claude/skills` 各补一条链接。
 
 主流程：`/grill-with-docs → /to-spec → /to-tickets → /implement → /code-review`。
 25 个 skill 怎么用（14 个用户调用 + 11 个模型调用）见 `docs/Matt-Skills-使用指南.md`。
 
-**副本提醒（重要）。** `DSH` 工作区里也有同一份 25 个 skill 的副本。**改 skill、或升级 skill 之后，
-两个仓库各要更新一次**（在各自目录跑 `npx skills update`，它按 `skills-lock.json` 刷新），否则两边行为会
-悄悄漂移 —— 同一个 `/implement` 在两个目录里跑出不同结果，是最难查的一类不一致。
-之所以选「各存一份」而不是让本仓库 junction 到 `DSH`：本仓库要能**独立存活**（将来推远端、换机器、
-或 `DSH` 被改名/删除），而 junction 不能进 git、跨机器失效。
+> **代价：本仓库不再自包含。** 换机器、或 clone 到别的机器时 skill 全部不可用，需要在那边重建
+> store 与两个用户级根。这是 2026-09-16 用「不漂移」换来的取舍 —— 在那之前本仓库与 `DSH` 各存一份
+> 副本，每次升级要在两个目录各跑一次 `npx skills update`，漏一处 `/implement` 就会跑出不同结果。
+> 来龙去脉见 `DSH` 仓库的 `docs/skills-unification/`。

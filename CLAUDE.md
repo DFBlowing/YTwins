@@ -8,9 +8,10 @@
 
 ## Claude Code
 
-**技能来源。** 25 个 skill 是本仓库自带的，在 `.agents/skills/`；`.claude/skills` 是指向它的目录 junction，
-所以 Claude Code 无需复制任何文件即可加载同一批。**改 skill 只改 `.agents/skills/` 一处**，两边同时生效；
-不要往 `.claude/` 里复制 SKILL.md。版本由 `skills-lock.json` 锁定。
+**技能来源。** 本仓库**不自带** skill 副本：25 个 Matt skill 的实体在中央 store
+`C:\Users\17624\.cc-switch\skills`，Claude Code 与 DSH 分别通过用户级根 `~/.claude/skills`、
+`~/.agents/skills`（都是链接层）读到同一批。**改 skill 只改中央 store 一处**，两边同时生效；
+在 store 里新增 skill 时，另需在两个用户级根各补一条链接。
 `disable-model-invocation: true` 与 `user-invocable: false` 在 Claude Code 与
 DSH 中字段名和语义一致，14 个「仅用户调用」的编排 skill 在 `/` 菜单里可用、不会被自动触发。
 
@@ -23,15 +24,16 @@ adapter、leverage、locality）保留英文原词。
 
 ## Claude Code 桥接（本仓库怎么接上的）
 
-桥接件只有两个，都不产生第二份真相：
+2026-09-16 起只剩一个桥接件 —— skill 改走用户级根，仓库里不再需要 skill 侧桥接：
 
 | 桥接件 | 类型 | 作用 |
 |---|---|---|
-| `.claude/skills` | **目录 junction** → `.agents/skills` | 让 Claude Code 发现这 25 个 skill，且不复制副本 |
 | `CLAUDE.md` | 文件（导入 `@AGENTS.md` + Claude 侧补充） | 让 Claude Code 拿到与 DSH 相同的指令 |
+| `~/.claude/skills` | 用户级链接层（**在仓库外**） | Claude Code 发现全部 skill；与 DSH 共用同一批实体 |
 
-**为什么是 junction + 导入，而不是符号链接。** Windows 上建符号链接需要管理员权限或开发者模式，
-junction 不用提权；导入则避免 `CLAUDE.md` 变成第二份指令。
+**为什么是导入，而不是符号链接。** Windows 上建符号链接需要管理员权限或开发者模式（Anthropic 官方
+文档即如此建议），导入则避免 `CLAUDE.md` 变成第二份指令。（原来那个 `.claude/skills` junction 已于
+2026-09-16 删除 —— 它指向 `.agents/skills`，而那批仓库内副本同一天一起删掉了。）
 
 **字段兼容性（已核对）。** `disable-model-invocation: true` 与 `user-invocable: false` 在 DSH 与
 Claude Code 中语义一致 —— 前者「不进模型技能目录 / 从上下文移除」，后者「不进 `/` 菜单 / Claude 仍可调用」。
@@ -50,7 +52,7 @@ Claude Code 中语义一致 —— 前者「不进模型技能目录 / 从上下
    需要硬约束时改用 hooks 或权限规则。
 
 **验证。** 在 `D:\AppData\Obsidian\AI_Message\YTwins` 下启动 Claude Code：`/context` 应显示 `CLAUDE.md`，
-`/skills` 应列出 25 个项目 skill，`/to-tickets` 应能直接调用。
+`/skills` 应列出这 25 个 skill（来源是 user，不是 project），`/to-tickets` 应能直接调用。
 
-**维护。** `.claude/` 不进 git（junction 在别的机器上无意义，重建成本极低）。删桥接 = 删 `.claude/skills`
-与 `CLAUDE.md`。**不要把 Claude Code 专属 skill 塞进 `.agents/skills/`** —— 那个目录 DSH 也会当成 skill 加载。
+**维护。** `.claude/` 不进 git。`CLAUDE.md` 是唯一还需要的桥接件，不要删。**不要再建仓库级的 skill
+链接** —— 要让 Claude Code 用上某个新 skill，在中央 store 建实体，再往两个用户级根各加一条链接。

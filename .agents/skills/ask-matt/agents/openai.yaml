@@ -1,5 +1,0 @@
-interface:
-  display_name: "问 Matt"
-  short_description: "找到该用的 skill 或流程"
-policy:
-  allow_implicit_invocation: false

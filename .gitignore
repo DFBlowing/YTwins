@@ -13,7 +13,7 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
-# Claude Code 的机器本地桥接目录（skills 走全局安装，见 AGENTS.md）
+# Claude Code 的机器本地目录（只剩 settings.local.json；skill 走用户级根，见 AGENTS.md）
 .claude/
 
 # 一次性安装实验的暂存区（可随时删）

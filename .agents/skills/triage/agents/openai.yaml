@@ -1,5 +1,0 @@
-interface:
-  display_name: "分诊"
-  short_description: "让 issue 走 triage 流程"
-policy:
-  allow_implicit_invocation: false

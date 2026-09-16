@@ -1,5 +1,0 @@
-interface:
-  display_name: "拆 ticket"
-  short_description: "把计划拆成 tracer-bullet ticket"
-policy:
-  allow_implicit_invocation: false
