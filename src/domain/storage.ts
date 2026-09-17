@@ -789,6 +789,25 @@ export interface DropStore {
   deleteConclusion(conclusionId: string): Promise<boolean>;
 
   /**
+   * Empty the library: every drop, term, link, matter, item, conclusion and
+   * surfacing, leaving the store ready to be used again.
+   *
+   * **Not a product operation.** Nothing in the product removes material this
+   * way — deletion is the two-step, previewed operation above, and it takes one
+   * fragment at a time. This exists for the demo's reset, which has to return a
+   * library to the same state twice so the same three acts can be run again, and
+   * it lives on the store rather than on the domain interface for exactly that
+   * reason: the domain's operations are task-shaped things the product does, and
+   * "empty everything" is not one of them. The demo reaches it through its own
+   * route, which exists only where a demo was asked for.
+   *
+   * The bookkeeping the domain keeps between looks goes too — an emptied library
+   * that still remembered a pending crossing would judge the next act against
+   * material that is no longer there.
+   */
+  clear(): Promise<void>;
+
+  /**
    * Drop terms from conclusions' support, leaving the sentences untouched.
    *
    * The one edit `original-only` makes to a judgement the user chose to keep, and

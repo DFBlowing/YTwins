@@ -920,3 +920,159 @@ body {
   border-radius: 0.6rem;
   color: var(--ink-soft);
 }
+
+/* The three-act demo's own block (13). Shown only where the server was started
+   in demo mode, and set apart from the acts themselves: it is not part of the
+   product the user drops things into — it is the script this machine is running,
+   and the one control that returns it to the beginning. */
+.demo {
+  margin-top: 2.5rem;
+  padding: 1rem 1.15rem;
+  border: 1px solid var(--line);
+  border-radius: 0.6rem;
+  background: #fff;
+}
+
+.demo-note,
+.demo-warning {
+  margin: 0 0 0.75rem;
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+}
+
+/* The warning is the page's one destructive step, so it carries the warning
+   colour and sits next to the button rather than in a modal someone can miss. */
+.demo-warning {
+  color: var(--warn);
+}
+
+.demo-acts {
+  margin: 0 0 1rem;
+  padding: 0;
+  list-style: none;
+}
+
+.demo-act {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  padding: 0.3rem 0;
+}
+
+.demo-act + .demo-act {
+  border-top: 1px solid var(--line);
+}
+
+.demo-act-label {
+  flex: none;
+  width: 1.4rem;
+  height: 1.4rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 0.8rem;
+  line-height: 1.4rem;
+  text-align: center;
+}
+
+.demo-act-line {
+  word-break: break-word;
+}
+
+.demo-reset {
+  padding: 0.35rem 0.9rem;
+  border: 1px solid var(--warn);
+  border-radius: 0.4rem;
+  background: transparent;
+  color: var(--warn);
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.demo-reset:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.demo-confirm {
+  margin-top: 0.75rem;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--warn);
+  border-radius: 0.5rem;
+}
+
+.demo-confirm-title {
+  margin: 0 0 0.6rem;
+  font-size: 0.9rem;
+}
+
+.demo-confirm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.demo-status {
+  margin: 0.75rem 0 0;
+  font-size: 0.85rem;
+  color: var(--accent);
+}
+
+.demo-status:empty {
+  display: none;
+}
+
+/* The data boundary (13). Its own block at the foot of every act, because it is
+   a fact about the whole product rather than about one of the three: the user is
+   owed it wherever they happen to be standing. */
+.boundary {
+  margin-top: 2.5rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--line);
+}
+
+.boundary-subtitle {
+  margin: 1.25rem 0 0.5rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--ink-soft);
+}
+
+.boundary-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.boundary-fact {
+  padding: 0.35rem 0 0.35rem 0.9rem;
+  border-left: 2px solid var(--line);
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+  word-break: break-word;
+}
+
+.boundary-fact + .boundary-fact {
+  margin-top: 0.35rem;
+}
+
+/* Nothing leaves this machine, which is a real answer rather than an empty
+   section — so it is stated rather than left blank. */
+.boundary-none {
+  margin: 0;
+  padding: 0.35rem 0 0.35rem 0.9rem;
+  border-left: 2px solid var(--accent);
+  font-size: 0.85rem;
+  color: var(--accent);
+}
+
+.boundary-problem {
+  margin: 1rem 0 0;
+  font-size: 0.85rem;
+  color: var(--warn);
+}
+
+.boundary-problem:empty {
+  display: none;
+}

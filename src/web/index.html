@@ -32,7 +32,7 @@
             class="drop-input"
             name="body"
             rows="4"
-            placeholder="比如：老师今天讲了期末怎么算分，下周三交提纲，好烦"
+            placeholder="不选类型、不填时间，直接丢"
             aria-label="投递内容"
           ></textarea>
           <button type="submit" class="drop-send" id="drop-send">丢进去</button>
@@ -129,7 +129,7 @@
             class="ask-input"
             name="question"
             type="text"
-            placeholder="比如：期末怎么算分"
+            placeholder="问一件留档里说过的事"
             aria-label="问题"
             autocomplete="off"
           />
@@ -185,7 +185,7 @@
             class="drop-input"
             name="body"
             rows="3"
-            placeholder="也可以自己再丢一句，比如：最近老想着学吉他，也在看琴行的帖子，周末想去试一节体验课"
+            placeholder="也可以自己再丢一句"
             aria-label="再丢一句"
           ></textarea>
           <button type="submit" class="drop-send" id="surface-send">再丢一句</button>
@@ -207,6 +207,50 @@
           <p class="surfaced-conclusions-label" id="surface-conclusions-label" hidden>它是由这几条汇成的：</p>
           <ul class="surfaced-conclusions" id="surface-conclusions" hidden></ul>
         </section>
+      </section>
+
+      <!--
+        三幕 demo（13）。只在服务端以 YTwins_PROVIDER=demo 起来时出现：台词由服务端
+        从预置素材里读出来（/api/demo），页面不抄第二份 —— 抄一份就会漂，而漂掉的
+        那一刻演示就不再是预置素材了。三幕要能连续重跑而结果不变，所以这里有一个
+        「重新开始演示」：先清空本机库，再把预置素材重新铺一遍。它和删除一样是两步
+        的 —— 一步就能清空整库的按钮，不值得放在一个随手点的地方。
+      -->
+      <section class="demo" id="demo" hidden>
+        <h2 class="section-title">三幕 demo</h2>
+        <p class="demo-note">
+          这台服务以演示模式运行：下面三句就是三幕的台词，由服务端从预置素材里读出来。第一幕丢第一句，第二幕问第二句，第三幕丢第三句。
+        </p>
+        <ol class="demo-acts" id="demo-acts"></ol>
+        <p class="demo-warning">
+          「重新开始演示」会清空这台机器上的全部素材（投递、词条、链接、小结论、事项），再把预置素材重新铺一遍。这一步不能撤销。
+        </p>
+        <div class="demo-reset-row" id="demo-reset-row">
+          <button type="button" class="demo-reset" id="demo-reset">重新开始演示</button>
+        </div>
+        <div class="demo-confirm" id="demo-confirm" hidden role="alertdialog" aria-labelledby="demo-confirm-title">
+          <p class="demo-confirm-title" id="demo-confirm-title">确认清空本机素材，并重新铺上预置素材？</p>
+          <div class="demo-confirm-actions">
+            <button type="button" class="removal-go" id="demo-confirm-go">清空并重新开始</button>
+            <button type="button" class="removal-cancel" id="demo-cancel">保留</button>
+          </div>
+        </div>
+        <p class="demo-status" id="demo-status" role="status" aria-live="polite"></p>
+      </section>
+
+      <!--
+        数据边界（13）。产品唯一需要用户自己做取舍的事：哪部分数据会离开这台机器。
+        内容由服务端按这台机器实际的接线读出来（/api/privacy），页面不写死 —— 页面
+        写一套、服务端跑另一套，就是这条披露本身在骗人。读不到时它会说自己没读到，
+        而不是显示成「什么都不出去」。
+      -->
+      <section class="boundary" id="boundary">
+        <h2 class="section-title">哪些数据会离开这台机器</h2>
+        <ul class="boundary-list" id="boundary-leaves"></ul>
+        <p class="boundary-none" id="boundary-leaves-none" hidden>没有：什么都不离开这台机器。</p>
+        <h3 class="boundary-subtitle">留在这台机器上的</h3>
+        <ul class="boundary-list" id="boundary-stays"></ul>
+        <p class="boundary-problem" id="boundary-problem" role="status" aria-live="polite"></p>
       </section>
     </main>
 

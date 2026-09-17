@@ -6,12 +6,13 @@
  *  - **the real provider** (`src/ai/`) — a cloud or local language model beside
  *    a local or cloud embedding, chosen by configuration. This is what the
  *    product runs, and it is the default.
- *  - **the demo stand-in** (`demo-provider.ts`) — the scripted, preset material
- *    tickets 01–11 ran on. It is kept, but only as something a person asks for
- *    by name (`YTwins_PROVIDER=demo`): a demo that must run on preset data is a
- *    real need, and turning the stand-in into an implicit fallback would make
- *    "the model is not configured" and "the model is a script" look the same
- *    from the outside, which is exactly the confusion this ticket exists to end.
+ *  - **the preset stand-in** (`src/domain/preset.ts`) — the scripted material the
+ *    three acts are demonstrated on. It is kept, but only as something a person
+ *    asks for by name (`YTwins_PROVIDER=demo`): the demo has to be the same
+ *    script every time it is run, and turning the stand-in into an implicit
+ *    fallback would make "the model is not configured" and "the model is a
+ *    script" look the same from the outside, which is exactly the confusion
+ *    ticket 12 exists to end.
  *
  * It lives here rather than in `src/ai/` because it is the only module that
  * knows both sides exist, and the dependency direction has to stay one way:
@@ -21,9 +22,9 @@
  */
 
 import type { AiProvider } from '../domain/ai-provider.ts';
+import { createPresetProvider } from '../domain/preset.ts';
 import type { ProviderConfig } from '../ai/config.ts';
 import { createRealProvider } from '../ai/real-provider.ts';
-import { createDemoProvider } from './demo-provider.ts';
 
 /** The provider to wire up, and what to say about it at startup. */
 export interface ConfiguredProvider {
@@ -48,10 +49,17 @@ export function createConfiguredProvider(
   } = {},
 ): ConfiguredProvider {
   if (config.choice === 'demo') {
+    const now = options.now;
     return {
-      provider: createDemoProvider(),
+      provider:
+        now === undefined
+          ? createPresetProvider()
+          : // The preset material's own clock, told as an ISO string the way the
+            // domain's is, so 「下周三」 resolves against the same today the drop
+            // itself was stamped with.
+            createPresetProvider({ now: (): string => now().toISOString() }),
       notes: [
-        'YTwins_PROVIDER=demo：用的是 01–11 的预置假 provider，回答全部来自写死的素材，不联网、不花 key。',
+        'YTwins_PROVIDER=demo：三幕跑在预置素材上，回答全部来自写死的素材，不联网、不花 key。',
       ],
     };
   }

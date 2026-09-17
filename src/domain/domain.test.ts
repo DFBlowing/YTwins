@@ -36,6 +36,16 @@ import {
   type FakeProviderScript,
 } from './fake-provider.ts';
 import type { Conclusion, Domain, InputType, SurfacingResult, Term, TermLink } from './interface.ts';
+import {
+  PRESET_ACTS,
+  PRESET_DROP_TERMS,
+  PRESET_EXAM_SUPPORT,
+  PRESET_FEELING_SUPPORT,
+  PRESET_ITEM_TEXT,
+  PRESET_LEADS,
+  createPresetProvider,
+  seedPreset,
+} from './preset.ts';
 import { openSqliteStore } from './sqlite-store.ts';
 import type { SurfacingPolicy } from './surfacing.ts';
 
@@ -5346,6 +5356,366 @@ await check('a correction whose target is gone is still readable', async () => {
       assert.equal(stranded?.text, CORRECTION_LINE, 'saying what it said');
       assert.equal(stranded?.relation, 'overturn', 'with the relation it was written under');
       assert.equal(stranded?.supersedes, null, 'and no pointer at something that is no longer there');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+console.log('\ndomain core — the three acts, on the preset material');
+
+/**
+ * The clock the preset material is read against.
+ *
+ * Pinned because the material says 「下周三」 rather than carrying a date: the
+ * day the demo runs decides which Wednesday that is, exactly as it would if a
+ * model read it, and a check that let the real clock decide could not name the
+ * day the second act's answer has to mention. 2026-09-17 is a Thursday, so the
+ * Wednesday it names is 2026-09-23.
+ */
+const PRESET_NOW = '2026-09-17T00:00:00.000Z';
+
+/** The "a few days later" viewpoint the second act asks from: exactly three days before the outline. */
+const PRESET_ASKED_AT = '2026-09-20T01:00:00.000Z';
+
+/**
+ * A library as a demo leaves it: the preset leads already in it, and the chain
+ * that read them.
+ *
+ * The same three things the server wires up for a demo — the one preset
+ * provider, the domain's own clock, and the dice pinned to their first face —
+ * because a check that ran on different wiring could pass while the demo failed.
+ *
+ * @param file - the database to open.
+ * @returns the store and the domain, with the leads laid down.
+ */
+async function presetRun(file: string): Promise<{
+  readonly store: ReturnType<typeof openSqliteStore>;
+  readonly domain: Domain;
+}> {
+  const store = openSqliteStore(file);
+  const now = (): string => PRESET_NOW;
+  const domain = createDomain({
+    store,
+    provider: createPresetProvider({ now }),
+    now,
+    // Pinned, and this is not a convenience: which of a band's openings a line
+    // carries is a roll, and the demo runs with the same roll pinned so that
+    // "run it again and it says the same thing" is a fact rather than a hope.
+    random: () => 0,
+  });
+  await seedPreset(domain);
+  return { store, domain };
+}
+
+/**
+ * The answer's shape, rather than one exact day count.
+ *
+ * The count is read off the moment asked and the material's own 「下周三」, which is
+ * resolved in **local** time, so an exact literal here would be a check that only
+ * passes in the timezone this machine happens to be in. What the second act
+ * promises is the grading scheme restated and the deadline said relative to that
+ * moment; that the count moves with the viewpoint is checked on its own.
+ */
+const PRESET_ANSWER_SHAPE = /^平时分占 40%，期末考占 60%。提纲还有 (\d+) 天到期。$/u;
+
+/** The day count an answer states, or a failed assertion naming what it said. */
+function presetDaysLeft(answer: string): number {
+  const match = PRESET_ANSWER_SHAPE.exec(answer);
+  assert.ok(match !== null, `the answer restates the grading and the deadline: ${answer}`);
+  return Number(match[1]);
+}
+
+/** What the three acts came to, in the words the page would show. */
+interface ThreeActs {
+  readonly itemText: string | undefined;
+  readonly itemDueAt: string | null | undefined;
+  readonly dropReply: string | undefined;
+  readonly dropTerms: readonly string[];
+  readonly answer: string;
+  readonly sources: readonly string[];
+  readonly actedOne: string;
+  readonly actedOneSupport: readonly string[];
+  readonly actedThree: string;
+  readonly actedThreeSupport: readonly string[];
+}
+
+/**
+ * Run the three acts against whatever library this domain holds.
+ *
+ * Written once and called twice by the repeatability check, because "the same
+ * result twice" is only a claim about **this** sequence of acts: a second
+ * spelling of the sequence could differ from the first and the comparison would
+ * then be checking nothing.
+ *
+ * Every step mirrors what the page does after a drop — read it back, then ask
+ * the product to speak — rather than reaching further into the domain than the
+ * page can.
+ *
+ * @param domain - the library to run against.
+ * @returns what a presenter would have seen, in the page's own terms.
+ */
+async function runThreeActs(domain: Domain): Promise<ThreeActs> {
+  // Act one: drop the messy fragment, and wait for it to be read.
+  const dropped = await domain.drop(PRESET_ACTS.drop);
+  await domain.extract(dropped.id);
+  const read = await domain.getDrop(dropped.id);
+  const first = await domain.requestSurfacing({ dropId: dropped.id });
+
+  // Act two: ask the question, from the "a few days later" viewpoint.
+  const asked = await domain.recall(PRESET_ACTS.question, { now: PRESET_ASKED_AT });
+
+  // Act three: one more feeling, and the moment it makes.
+  const felt = await domain.drop(PRESET_ACTS.feeling);
+  await domain.extract(felt.id);
+  const third = await domain.requestSurfacing({ dropId: felt.id });
+
+  return {
+    itemText: read?.items[0]?.text,
+    itemDueAt: read?.items[0]?.dueAt,
+    dropReply: read?.reply,
+    dropTerms: (read?.terms ?? []).map((term) => term.text),
+    answer: asked.kind === 'answered' ? asked.answer : `(${asked.kind})`,
+    sources: asked.kind === 'answered' ? asked.sources.map((source) => source.body) : [],
+    actedOne: first.kind === 'surfaced' ? first.text : `(${first.kind})`,
+    actedOneSupport: first.kind === 'surfaced' ? first.support.map((term) => term.text) : [],
+    actedThree: third.kind === 'surfaced' ? third.text : `(${third.kind})`,
+    actedThreeSupport: third.kind === 'surfaced' ? third.support.map((term) => term.text) : [],
+  };
+}
+
+await check('the preset material is already in the library when a demo starts', async () => {
+  await withDatabase(async (file) => {
+    const { store, domain } = await presetRun(file);
+    try {
+      const drops = await domain.listDrops();
+      assert.deepEqual(
+        drops.map((drop) => drop.body),
+        [...PRESET_LEADS],
+        'the leads are ordinary drops, in the order the demo lays them down',
+      );
+      assert.ok(
+        drops.every((drop) => drop.extracted),
+        'and each has been read before the demo starts, so the first act does not race them',
+      );
+      assert.equal(
+        (await domain.listConclusions()).length,
+        0,
+        'nothing has crossed the threshold yet: the acts are what crosses it',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('act one: the messy fragment splits into an item and a faithful record', async () => {
+  await withDatabase(async (file) => {
+    const { store, domain } = await presetRun(file);
+    try {
+      const dropped = await domain.drop(PRESET_ACTS.drop);
+      await domain.extract(dropped.id);
+      const read = await domain.getDrop(dropped.id);
+
+      // No type was chosen and no time was filled in: the fragment is one
+      // unformatted sentence, and both halves come out of it anyway.
+      assert.equal(read?.body, PRESET_ACTS.drop, 'the record is the original, verbatim');
+      assert.equal(read?.items.length, 1, 'and one item was read out of it');
+      assert.equal(read?.items[0]?.text, PRESET_ITEM_TEXT);
+      assert.deepEqual(
+        read?.terms.map((term) => term.text),
+        [...PRESET_DROP_TERMS],
+        'the words it yielded are the user\'s own',
+      );
+
+      // 「下周三」 resolved against the day the demo ran, the way a real reader
+      // would resolve it — and a Wednesday, which is what the words say.
+      const due = new Date(read?.items[0]?.dueAt ?? '');
+      assert.equal(due.getDay(), 3, 'the deadline is the Wednesday the fragment named');
+      assert.ok(due.getTime() > Date.parse(PRESET_NOW), 'and it is still ahead');
+      assert.ok(
+        due.getTime() - Date.parse(PRESET_NOW) < 7 * 86_400_000,
+        'and it is the next one rather than a later one',
+      );
+      assert.equal(due.getHours(), 9, 'at the hour a deadline is usually given');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('act one is a moment: the preset material speaks once the matter has been raised again', async () => {
+  await withDatabase(async (file) => {
+    const { store, domain } = await presetRun(file);
+    try {
+      const dropped = await domain.drop(PRESET_ACTS.drop);
+      await domain.extract(dropped.id);
+
+      const surfaced = await domain.requestSurfacing({ dropId: dropped.id });
+      assert.equal(surfaced.kind, 'surfaced', 'the third mention is the crossing, and it is a moment');
+      assert.equal(surfaced.tier, 'weak', 'said in one sitting, so the line is hedged');
+      assert.equal(
+        surfaced.text,
+        '我不太确定：你最近好像有几件事堆在一起，心里一直不太顺。',
+        'the sentence is the provider\'s and the uncertainty in front of it is code\'s',
+      );
+      assert.deepEqual(
+        surfaced.support.map((term) => term.text),
+        [...PRESET_EXAM_SUPPORT],
+        'with every preset word behind it named',
+      );
+
+      const [conclusion] = await domain.listConclusions();
+      assert.equal(conclusion?.kind, 'claim', 'and the portrait holds a judgement, not a catch');
+      assert.equal(conclusion?.mentions, 3, 'standing on the three times it was raised');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('act two: the question is answered, and it names the drop it came from', async () => {
+  await withDatabase(async (file) => {
+    const { store, domain } = await presetRun(file);
+    try {
+      const dropped = await domain.drop(PRESET_ACTS.drop);
+      await domain.extract(dropped.id);
+
+      const asked = await domain.recall(PRESET_ACTS.question, { now: PRESET_ASKED_AT });
+      assert.equal(asked.kind, 'answered');
+      const left = presetDaysLeft(asked.kind === 'answered' ? asked.answer : '');
+      assert.deepEqual(
+        asked.sources.map((source) => source.dropId),
+        [dropped.id],
+        'the fragment that was just dropped is the one it came from',
+      );
+      assert.equal(asked.sources[0]?.body, PRESET_ACTS.drop, 'quoted verbatim, so it can be checked');
+
+      // The viewpoint is observable: the same question asked a day nearer leaves
+      // exactly one day less. A property rather than a literal, so the check does
+      // not hang on which timezone the material's Wednesday was resolved in.
+      const nearer = await domain.recall(PRESET_ACTS.question, {
+        now: '2026-09-21T01:00:00.000Z',
+      });
+      assert.equal(nearer.kind, 'answered');
+      assert.equal(
+        presetDaysLeft(nearer.kind === 'answered' ? nearer.answer : ''),
+        left - 1,
+        'the deadline is said relative to the moment asked',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('act three: one more feeling surfaces its own conclusion, on the preset words', async () => {
+  await withDatabase(async (file) => {
+    const { store, domain } = await presetRun(file);
+    try {
+      // The first act has already been run, so the moment this act reaches is a
+      // second one rather than a colder one: the exam has been heard, and the
+      // sleep material has not.
+      const dropped = await domain.drop(PRESET_ACTS.drop);
+      await domain.extract(dropped.id);
+      const first = await domain.requestSurfacing({ dropId: dropped.id });
+      assert.equal(first.kind, 'surfaced', 'act one speaks, so act three is a moment of its own');
+
+      const felt = await domain.drop(PRESET_ACTS.feeling);
+      await domain.extract(felt.id);
+      const third = await domain.requestSurfacing({ dropId: felt.id });
+
+      assert.equal(third.kind, 'surfaced', 'the second feeling surfaces rather than remaining silent');
+      assert.equal(third.tier, 'weak');
+      assert.equal(
+        third.text,
+        '我不太确定：你最近睡得不太好，白天也提不起劲。',
+        'one line, in the uncertain register the band earns',
+      );
+      assert.deepEqual(
+        third.support.map((term) => term.text),
+        [...PRESET_FEELING_SUPPORT],
+        'supported by the preset words, which is what makes it a judgement rather than a guess',
+      );
+      assert.equal(third.mentions, 3, 'raised three times: twice in the leads, once by the act');
+      assert.equal(
+        (await domain.listConclusions()).length,
+        2,
+        'two matters have been judged, and the second act did not restate the first',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('the reset leaves an empty library, and one that can be used again', async () => {
+  await withDatabase(async (file) => {
+    const { store, domain } = await presetRun(file);
+    try {
+      // Something of every kind the interface can see, so that "empty" means
+      // something: the acts are run first, then the reset is asked for.
+      await runThreeActs(domain);
+
+      await store.clear();
+
+      assert.deepEqual(await domain.listDrops(), [], 'no fragments left');
+      assert.deepEqual(await domain.listItems(), [], 'and nothing to do');
+      assert.deepEqual(await domain.listLinks(), [], 'and no links between words that are gone');
+      assert.deepEqual(await domain.listConclusions(), [], 'and no judgements');
+      assert.deepEqual(
+        await domain.upcoming(),
+        { due: [], unscheduled: [] },
+        'and the timeline is empty in both of its halves',
+      );
+
+      // And it is a library again rather than merely blank: the leads go back
+      // down, and the acts run on it exactly as they did on a fresh file.
+      await seedPreset(domain);
+      assert.equal((await domain.listDrops()).length, PRESET_LEADS.length);
+      const again = await runThreeActs(domain);
+      assert.equal(again.actedThree, '我不太确定：你最近睡得不太好，白天也提不起劲。');
+
+      // Clearing twice is not an error: a demo may be started over twice.
+      await store.clear();
+      assert.deepEqual(await domain.listDrops(), []);
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('the three acts run twice over the same library and come back the same', async () => {
+  await withDatabase(async (file) => {
+    const { store, domain } = await presetRun(file);
+    try {
+      const first = await runThreeActs(domain);
+
+      // The reset a demo does between runs: the library is emptied and the
+      // preset leads are laid down again, on the one chain the acts run on.
+      await store.clear();
+      await seedPreset(domain);
+
+      // What the acts came to, spelled out rather than read back out of the
+      // second run: a comparison between two runs of the same code would agree
+      // with itself whatever the lines were, and the script makes promises about
+      // what they are.
+      assert.equal(first.itemText, PRESET_ITEM_TEXT);
+      assert.ok(first.itemDueAt !== null && first.itemDueAt !== undefined, 'the item carries a date');
+      assert.deepEqual(first.dropTerms, [...PRESET_DROP_TERMS]);
+      assert.equal(first.dropReply, '听着，事情全堆在一起，心里挺堵的。');
+      assert.match(first.answer, PRESET_ANSWER_SHAPE);
+      assert.equal(first.sources.length, 1, 'one source, and the second act says which');
+      assert.equal(first.actedOne, '我不太确定：你最近好像有几件事堆在一起，心里一直不太顺。');
+      assert.equal(first.actedThree, '我不太确定：你最近睡得不太好，白天也提不起劲。');
+      assert.deepEqual(first.actedThreeSupport, [...PRESET_FEELING_SUPPORT]);
+
+      const second = await runThreeActs(domain);
+      assert.deepEqual(
+        second,
+        first,
+        'same material, same chain, same lines — nothing left to luck',
+      );
     } finally {
       await store.close();
     }

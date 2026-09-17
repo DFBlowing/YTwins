@@ -27,8 +27,10 @@ import { ProviderConfigError, resolveProviderConfig, type ProviderConfig } from 
 import { loadEnvFile } from '../ai/env-file.ts';
 import { createDomain } from '../domain/core.ts';
 import { isDeletionMode, type Domain } from '../domain/interface.ts';
+import { PRESET_ACTS, seedPreset, type PresetActs } from '../domain/preset.ts';
 import { openSqliteStore } from '../domain/sqlite-store.ts';
 import { createConfiguredProvider } from './provider.ts';
+import { describeDataBoundary, type DataBoundary } from './privacy.ts';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
 const REPO_ROOT = resolve(HERE, '..', '..');
@@ -36,6 +38,8 @@ const REPO_ROOT = resolve(HERE, '..', '..');
 const WEB_DIST = join(REPO_ROOT, 'dist', 'web');
 /** Where the SQLite file lives. Ignored by git — it is this machine's data. */
 const DEFAULT_DB = join(REPO_ROOT, 'data', 'ytwins.sqlite');
+/** The file a demo gets by default, so its reset cannot empty the one above. */
+const DEFAULT_DEMO_DB = join(REPO_ROOT, 'data', 'demo.sqlite');
 /** Where the API key lives, when one is needed. Ignored by git. */
 const ENV_FILE = join(REPO_ROOT, '.env');
 
@@ -102,14 +106,44 @@ async function serveStatic(response: ServerResponse, file: string): Promise<void
 }
 
 /**
+ * The demo's own two routes, handed in only where a demo was asked for.
+ *
+ * There is deliberately no way to reach a reset on a server started without
+ * `YTwins_PROVIDER=demo`: emptying the library is not an operation the product
+ * has (deletion is the previewed, one-fragment-at-a-time operation above), and a
+ * request shape that wiped everything must not exist on a server somebody is
+ * using for real.
+ */
+export interface DemoRoutes {
+  /** The three acts, exactly as the preset material holds them. */
+  readonly acts: PresetActs;
+  /** Empty this machine's library and lay the preset material down again. */
+  reset(): Promise<void>;
+}
+
+/** What the handler needs besides the domain, if the server knows it. */
+export interface HandlerOptions {
+  /**
+   * What leaves this machine, in the user's terms.
+   *
+   * Absent means this server was not told, and the page is told that it was not
+   * told — a disclosure nobody made must not be able to render as a reassurance.
+   */
+  readonly boundary?: DataBoundary;
+  /** The demo's routes, present only where a demo was asked for. */
+  readonly demo?: DemoRoutes;
+}
+
+/**
  * Build the request handler around one domain instance.
  *
  * Exported so the routing can be exercised without opening a socket.
  *
  * @param domain - the domain core every request goes through.
+ * @param options - the boundary and the demo routes, when this server has them.
  * @returns the handler.
  */
-export function createHandler(domain: Domain) {
+export function createHandler(domain: Domain, options: HandlerOptions = {}) {
   return async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const url = request.url ?? '/';
 
@@ -434,7 +468,61 @@ export function createHandler(domain: Domain) {
       }
     }
 
+    // Which part of what you say leaves this machine (ticket 13). Its own read
+    // rather than a line baked into the page, because the honest answer depends
+    // on how **this** server is wired: a page stating one combination while the
+    // server ran another would be a disclosure that lies. A server that was not
+    // told answers 404 rather than an empty pair of lists — "nobody said" and
+    // "nothing leaves" are opposite facts.
+    if (request.method === 'GET' && url === '/api/privacy') {
+      if (options.boundary === undefined) {
+        sendJson(response, 404, { error: '这个服务没有说明数据边界' });
+        return;
+      }
+      sendJson(response, 200, { boundary: options.boundary });
+      return;
+    }
+
+    // The demo's script, and whether there is one at all. A 200 with `demo:
+    // null` rather than a 404: the page asks this on every load to decide
+    // whether to draw its demo block, and "this server has no demo" is an
+    // ordinary answer to that question rather than a missing resource.
+    if (request.method === 'GET' && url === '/api/demo') {
+      sendJson(response, 200, { demo: options.demo === undefined ? null : { acts: options.demo.acts } });
+      return;
+    }
+
+    // Start the demo over: empty the library, lay the preset material down
+    // again. The one destructive route in the product, and it exists only on a
+    // server started in demo mode — see `DemoRoutes`. It takes no body and has
+    // no options, because the state it returns to is the whole of what it does.
+    if (request.method === 'POST' && url === '/api/demo/reset') {
+      if (options.demo === undefined) {
+        sendJson(response, 404, { error: '这个服务没有演示模式' });
+        return;
+      }
+      try {
+        await options.demo.reset();
+        sendJson(response, 200, { demo: { acts: options.demo.acts } });
+      } catch (error) {
+        sendJson(response, 500, {
+          error: error instanceof Error ? error.message : '重新开始演示失败',
+        });
+      }
+      return;
+    }
+
     if (request.method === 'GET') {
+      // Nothing under `/api/` is a page. Without this, an unknown API path falls
+      // through to the built page and comes back **200 with HTML** — which would
+      // make "this server has no such route" invisible (a check asking for
+      // `/api/signup` would see a success), and would hand a client that parsed
+      // the response as JSON a document instead of an error.
+      if (url === '/api' || url.startsWith('/api/')) {
+        sendJson(response, 404, { error: '没有这个接口' });
+        return;
+      }
+
       const requested = resolveStaticFile(url);
       const file = requested ?? join(WEB_DIST, 'index.html');
       if (statSync(file, { throwIfNoEntry: false })?.isFile() === true) {
@@ -480,19 +568,60 @@ async function main(): Promise<void> {
   }
 
   const { provider, notes } = createConfiguredProvider(config);
-  const store = openSqliteStore(process.env['YTwins_DB'] ?? DEFAULT_DB);
-  const domain = createDomain({ store, provider });
+  // Where this run keeps its material. A demo gets a file of its own by default,
+  // and that is a safety property rather than tidiness: the demo has a button
+  // that empties the library, and it must not be able to take the user's own
+  // drops with it. `YTwins_DB` still wins when it is set — a person who named a
+  // file meant that file.
+  const dbFile =
+    process.env['YTwins_DB'] ?? (config.choice === 'demo' ? DEFAULT_DEMO_DB : DEFAULT_DB);
+  const store = openSqliteStore(dbFile);
+  const domain = createDomain({
+    store,
+    provider,
+    // The demo's dice are pinned, and only the demo's. Whether a turn that could
+    // speak uses it, which conclusion it shows and which of its band's openings
+    // the line carries are all rolls — and the one promise the three acts make is
+    // that running them again says the same thing. Pin them and that is a fact;
+    // leave them and "run it twice" is a hope. The product itself keeps the real
+    // dice, which is where the visible moment's legibility was meant to live.
+    ...(config.choice === 'demo' ? { random: (): number => 0 } : {}),
+  });
+
+  // The demo's reset, and it is the store's own clearing: the library is emptied
+  // and the preset leads are dropped through the ordinary path, so what the acts
+  // run on afterwards is a real chain rather than a special state.
+  const demo: DemoRoutes | undefined =
+    config.choice === 'demo'
+      ? {
+          acts: PRESET_ACTS,
+          reset: async (): Promise<void> => {
+            await store.clear();
+            await seedPreset(domain);
+          },
+        }
+      : undefined;
+
+  const handler = createHandler(domain, {
+    boundary: describeDataBoundary(config),
+    ...(demo === undefined ? {} : { demo }),
+  });
 
   // Which pair this machine is actually running, in one line each, and never a
   // key: the notes say whether one is configured, not what it is. This is the
   // only place a person finds out, because the combination is a property of the
   // environment and not of the page.
   for (const note of notes) console.log(note);
+  if (config.choice === 'demo') {
+    // Said out loud because it is the one thing a presenter has to know before
+    // pressing the button that empties the library: which library it empties.
+    console.log(`演示模式用的库：${dbFile}（「重新开始演示」清空的是它）`);
+  }
 
   const server = createServer((request, response) => {
     // One handler rejection must never be an unhandled rejection: that would
     // kill the process and lose the user's session over a single bad request.
-    createHandler(domain)(request, response).catch(() => {
+    handler(request, response).catch(() => {
       if (!response.headersSent) {
         response.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' });
         response.end('服务出错了。');

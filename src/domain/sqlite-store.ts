@@ -1301,6 +1301,40 @@ export function openSqliteStore(file: string): DropStore {
       return row === undefined ? null : toStoredItem(row);
     },
 
+    async clear(): Promise<void> {
+      // The tables to empty are read from the schema itself rather than listed
+      // here: a hand-kept list would be a second copy of the schema, and the day
+      // somebody adds a table is the day the demo's reset starts leaving material
+      // behind. `settle_state_` is the one exclusion — it holds no material, and
+      // its single row is put back below instead of being deleted.
+      const tables = db
+        .prepare(
+          `SELECT name FROM sqlite_master
+             WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name <> 'settle_state_'
+             ORDER BY name`,
+        )
+        .all() as unknown as { readonly name: string }[];
+
+      // One transaction, because a half-emptied library is a state neither the
+      // demo nor the product has a reading for. The order is whatever the schema
+      // returned: every reference in it carries an `ON DELETE` action (cascade or
+      // set-null), so no delete can be blocked by a row another table still
+      // points at — and a table added later *without* one fails loudly here
+      // rather than being quietly skipped.
+      db.exec('BEGIN');
+      try {
+        for (const table of tables) db.exec(`DELETE FROM "${table.name}"`);
+        db.exec(
+          `INSERT INTO settle_state_ (id, drops_since, look_now_next) VALUES (1, 0, 1)
+             ON CONFLICT (id) DO UPDATE SET drops_since = 0, look_now_next = 1`,
+        );
+        db.exec('COMMIT');
+      } catch (error) {
+        db.exec('ROLLBACK');
+        throw error;
+      }
+    },
+
     async close(): Promise<void> {
       db.close();
     },

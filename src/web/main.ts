@@ -270,6 +270,32 @@ type SurfacingResult =
 type DeletionMode = 'cascade' | 'original-only' | 'keep';
 
 /**
+ * The demo's three lines, as the server holds them.
+ *
+ * One per act, and they are the preset material's own strings: the page types
+ * them into a placeholder rather than keeping a copy, because a copy that drifted
+ * would leave the demo looking right while running on something else.
+ */
+interface DemoActs {
+  readonly drop: string;
+  readonly question: string;
+  readonly feeling: string;
+}
+
+/**
+ * What leaves this machine, as the server reports it.
+ *
+ * Two lists of facts rather than a reassurance, and read from the server because
+ * the honest answer depends on how this machine is actually wired — a page
+ * stating one combination while the server ran another would be the one lie this
+ * disclosure exists to prevent.
+ */
+interface DataBoundary {
+  readonly leaves: readonly string[];
+  readonly stays: readonly string[];
+}
+
+/**
  * What deleting one fragment would take, as the server reports it.
  *
  * Mirrors the domain's shape: the conclusions come as the sentences themselves
@@ -359,6 +385,20 @@ const surfaceWhy = mustFind<HTMLParagraphElement>('#surface-why');
 const surfaceSupport = mustFind<HTMLUListElement>('#surface-support');
 const surfaceConclusionsLabel = mustFind<HTMLParagraphElement>('#surface-conclusions-label');
 const surfaceConclusions = mustFind<HTMLUListElement>('#surface-conclusions');
+
+const demoBlock = mustFind<HTMLElement>('#demo');
+const demoActs = mustFind<HTMLOListElement>('#demo-acts');
+const demoReset = mustFind<HTMLButtonElement>('#demo-reset');
+const demoResetRow = mustFind<HTMLElement>('#demo-reset-row');
+const demoConfirm = mustFind<HTMLElement>('#demo-confirm');
+const demoConfirmGo = mustFind<HTMLButtonElement>('#demo-confirm-go');
+const demoCancel = mustFind<HTMLButtonElement>('#demo-cancel');
+const demoStatus = mustFind<HTMLParagraphElement>('#demo-status');
+
+const boundaryLeaves = mustFind<HTMLUListElement>('#boundary-leaves');
+const boundaryLeavesNone = mustFind<HTMLParagraphElement>('#boundary-leaves-none');
+const boundaryStays = mustFind<HTMLUListElement>('#boundary-stays');
+const boundaryProblem = mustFind<HTMLParagraphElement>('#boundary-problem');
 
 /** How many times to ask whether a fresh drop has been read, and how often. */
 const POLL_ATTEMPTS = 40;
@@ -841,10 +881,7 @@ async function carryOutRemoval(mode: DeletionMode): Promise<void> {
     hideRemoval();
     removalNote.textContent = deletionLine(payload.deleted);
 
-    await loadDrops();
-    await loadLinks();
-    await loadConclusions();
-    await loadUpcoming();
+    await loadEverything();
   } catch {
     removalNote.textContent = '连不上本地服务。';
   } finally {
@@ -1646,8 +1683,165 @@ for (const tab of document.querySelectorAll<HTMLButtonElement>('.act-tab')) {
   tab.addEventListener('click', () => showAct(tab.dataset['act'] ?? 'drop'));
 }
 
-void loadDrops();
-void loadLinks();
-void loadConclusions();
-void loadUpcoming();
-void refreshSurfaceAgain();
+/**
+ * Every read the page draws from, in one call.
+ *
+ * One list because two callers need exactly the same set — the first load, and a
+ * demo reset, which invalidates all of it at once — and a second spelling of the
+ * set would be a read that one of them forgot.
+ */
+async function loadEverything(): Promise<void> {
+  await loadDrops();
+  await loadLinks();
+  await loadConclusions();
+  await loadUpcoming();
+  await refreshSurfaceAgain();
+}
+
+/** One fact on the boundary lists, as a row the page can show. */
+function renderFact(line: string): HTMLLIElement {
+  const item = document.createElement('li');
+  item.className = 'boundary-fact';
+  item.textContent = line;
+  return item;
+}
+
+/**
+ * Show which part of what the user says leaves this machine.
+ *
+ * A read that failed leaves **nothing** on screen and says that it failed: an
+ * empty pair of lists would render as "nothing leaves", which is the exact
+ * opposite of what is known at that moment. This is the one place on the page
+ * where the distinction between "we could not read it" and "there is nothing" is
+ * not merely honest but load-bearing.
+ */
+async function loadBoundary(): Promise<void> {
+  try {
+    const response = await fetch('/api/privacy');
+    if (!response.ok) throw new Error('read failed');
+    const payload = (await response.json()) as { boundary: DataBoundary };
+    boundaryLeaves.replaceChildren(...payload.boundary.leaves.map(renderFact));
+    boundaryLeavesNone.hidden = payload.boundary.leaves.length > 0;
+    boundaryStays.replaceChildren(...payload.boundary.stays.map(renderFact));
+    boundaryProblem.textContent = '';
+  } catch {
+    boundaryLeaves.replaceChildren();
+    boundaryLeavesNone.hidden = true;
+    boundaryStays.replaceChildren();
+    boundaryProblem.textContent = '这次没读到数据边界，稍后再试试。';
+  }
+}
+
+/**
+ * Show the demo's script, if this server has one.
+ *
+ * The three lines come from the server rather than from this file, and the
+ * placeholders are filled from them: what gets typed on stage is then the same
+ * string the preset material reads, by construction rather than by care. A server
+ * without a demo hides the whole block — there is no script to show and no reset
+ * to offer, and a disabled button would suggest otherwise.
+ */
+async function loadDemo(): Promise<void> {
+  let acts: DemoActs | null = null;
+  try {
+    const response = await fetch('/api/demo');
+    if (!response.ok) throw new Error('read failed');
+    const payload = (await response.json()) as { demo: { acts: DemoActs } | null };
+    acts = payload.demo?.acts ?? null;
+  } catch {
+    acts = null;
+  }
+
+  if (acts === null) {
+    demoBlock.hidden = true;
+    return;
+  }
+
+  const lines: readonly (readonly [string, string])[] = [
+    ['丢', acts.drop],
+    ['问', acts.question],
+    ['浮', acts.feeling],
+  ];
+  demoActs.replaceChildren(
+    ...lines.map(([act, line]) => {
+      const item = document.createElement('li');
+      item.className = 'demo-act';
+      const label = document.createElement('span');
+      label.className = 'demo-act-label';
+      label.textContent = act;
+      const text = document.createElement('span');
+      text.className = 'demo-act-line';
+      text.textContent = line;
+      item.append(label, text);
+      return item;
+    }),
+  );
+
+  // In demo mode the boxes carry the script **exactly**: a placeholder that
+  // read 「比如：…」 would be copied on stage along with the prefix, and a fragment
+  // with one character in front of it matches no preset reading — which is how a
+  // demo quietly stops being one. So the placeholder is the line itself, and the
+  // page's own static placeholders carry no example for it to be confused with.
+  input.placeholder = acts.drop;
+  askInput.placeholder = acts.question;
+  surfaceInput.placeholder = acts.feeling;
+  demoBlock.hidden = false;
+}
+
+/** Put the reset question on screen, the way the deletion preview does. */
+function showDemoConfirm(): void {
+  demoConfirm.hidden = false;
+  demoResetRow.hidden = true;
+  demoConfirmGo.focus();
+}
+
+/** Close the reset question, whether or not anything was cleared. */
+function hideDemoConfirm(): void {
+  demoConfirm.hidden = true;
+  demoResetRow.hidden = false;
+}
+
+/**
+ * Start the demo over: empty this machine's library, and lay the preset material
+ * down again.
+ *
+ * Everything on screen was about material that no longer exists afterwards, so
+ * the reads are re-run rather than edited: the same reasoning a deletion gets,
+ * for the same reason — this is a change to all of it at once.
+ */
+async function resetDemo(): Promise<void> {
+  demoReset.disabled = true;
+  demoConfirmGo.disabled = true;
+  try {
+    const response = await fetch('/api/demo/reset', { method: 'POST' });
+    if (!response.ok) {
+      demoStatus.textContent = '没能重新开始，再试一次。';
+      return;
+    }
+    clearAnswer();
+    reply.textContent = '';
+    surfacedInline.hidden = true;
+    surfaceReply.textContent = '';
+    surfaceResult.hidden = true;
+    surfaceMiss.hidden = true;
+    await loadEverything();
+    demoStatus.textContent = '已经回到预置素材，可以从第一幕重跑了。';
+  } catch {
+    demoStatus.textContent = '连不上本地服务。';
+  } finally {
+    demoReset.disabled = false;
+    demoConfirmGo.disabled = false;
+    hideDemoConfirm();
+  }
+}
+
+demoReset.addEventListener('click', showDemoConfirm);
+demoCancel.addEventListener('click', () => {
+  hideDemoConfirm();
+  demoReset.focus();
+});
+demoConfirmGo.addEventListener('click', () => void resetDemo());
+
+void loadEverything();
+void loadDemo();
+void loadBoundary();
