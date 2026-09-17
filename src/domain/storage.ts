@@ -213,6 +213,18 @@ export interface StoredConclusion {
   readonly id: string;
   /** Which matter it came out of. */
   readonly matterId: string;
+  /**
+   * The sentence the provider wrote, before the band's frame, or null for a
+   * catch.
+   *
+   * Kept beside `text` rather than read back out of it, because the **surfacing**
+   * moment needs the sentence to put its own opening in front of (ticket 06), and
+   * a frame recovered by stripping a prefix off a stored string would be a fact
+   * about today's `frameFor` rather than about what was written. Null on a catch,
+   * which has no sentence of its own: what it holds is the line the newest feeling
+   * was already answered with.
+   */
+  readonly claim: string | null;
   /** The sentence, frame included. */
   readonly text: string;
   /** Whether it claims a pattern, or catches the newest feeling. */
@@ -237,6 +249,28 @@ export interface StoredConclusion {
 
 /** A conclusion the store has not minted an id for yet. */
 export type NewConclusion = Omit<StoredConclusion, 'id'>;
+
+/**
+ * One **surfacing** as the store keeps it: a conclusion shown to the user, and
+ * when.
+ *
+ * The record exists for one rule — "the same topic does not surface twice inside
+ * seven days" — and that rule has to survive a restart, so it is a row rather
+ * than something the running process remembers. What counts as the same topic is
+ * the support behind **what was shown**, which is why the terms travel with the
+ * record: they are the fact the cooldown is measured on, read from the
+ * conclusion's own support rather than restated here.
+ */
+export interface StoredSurfacing {
+  /** Stable identity of this surfacing. */
+  readonly id: string;
+  /** The conclusion that was shown. */
+  readonly conclusionId: string;
+  /** When it was shown, as an ISO-8601 string. */
+  readonly surfacedAt: string;
+  /** The terms that stood behind it, in the order they were said. */
+  readonly supportTermIds: readonly string[];
+}
 
 /**
  * How far the invisible settling has got.
@@ -322,9 +356,10 @@ export interface RecordedReading {
  *
  * Deliberately narrow: it records drops and what was read out of them — items,
  * terms, the links that follow from both being said together — and reads them
- * back. It also keeps the two things ticket 05 settles into: the **matters**
- * material accumulates into, and the conclusions assembled out of them. Later
- * tickets widen this port as they add entities.
+ * back. It also keeps the two things ticket 05 settles into — the **matters**
+ * material accumulates into, and the conclusions assembled out of them — and what
+ * ticket 06 shows of them: the **surfacings**, which are what the cooldown is
+ * measured from. Later tickets widen this port as they add entities.
  */
 export interface DropStore {
   /**
@@ -489,6 +524,23 @@ export interface DropStore {
    * @returns the conclusion as stored, with the id the store minted.
    */
   appendConclusion(conclusion: NewConclusion): Promise<StoredConclusion>;
+
+  /** Every surfacing so far, oldest first, each with the terms behind it. */
+  listSurfacings(): Promise<readonly StoredSurfacing[]>;
+
+  /**
+   * Record that a conclusion was shown to the user.
+   *
+   * Written **when it is shown**, not when it is decided, because that is the
+   * moment the cooldown is measured from: a conclusion assembled a week ago and
+   * surfaced today keeps the topic quiet for a week from today. The row is what
+   * makes the rule outlive the process.
+   *
+   * @param conclusionId - the conclusion that was shown.
+   * @param at - when, as an ISO-8601 string, from the domain's clock.
+   * @returns the surfacing as stored, with the terms that stood behind it.
+   */
+  recordSurfacing(conclusionId: string, at: string): Promise<StoredSurfacing>;
 
   /** How far the invisible settling has got. */
   readSettlement(): Promise<StoredSettlement>;

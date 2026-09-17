@@ -34,8 +34,9 @@ import {
   type ExtractScript,
   type FakeProviderScript,
 } from './fake-provider.ts';
-import type { Conclusion, Domain, Term, TermLink } from './interface.ts';
+import type { Conclusion, Domain, InputType, SurfacingResult, Term, TermLink } from './interface.ts';
 import { openSqliteStore } from './sqlite-store.ts';
+import type { SurfacingPolicy } from './surfacing.ts';
 
 let failures = 0;
 let checks = 0;
@@ -1238,8 +1239,20 @@ await check('vectors from a different embedding model are never compared', async
 
 console.log('\ndomain core — what settles into a conclusion');
 
-/** A fragment, the terms it yields, and the feeling or decision it is about. */
-type AnchoredReading = readonly [body: string, terms: readonly string[], anchor: string | null];
+/**
+ * A fragment, the terms it yields, the feeling or decision it is about, and —
+ * where a check needs it — what the model judged the drop to be.
+ *
+ * The fourth element is optional and defaults to an emotional drop, because that
+ * is what most checks are about; the ones about the **trigger** have to be able to
+ * hand the domain a drop that is read as something else.
+ */
+type AnchoredReading = readonly [
+  body: string,
+  terms: readonly string[],
+  anchor: string | null,
+  inputType?: InputType,
+];
 
 /**
  * Script the fake to read those fragments into those terms and anchors, and
@@ -1252,10 +1265,10 @@ function mattersOnly(
   extra: Omit<FakeProviderScript, 'extractByBody'> = {},
 ): ReturnType<typeof createFakeProvider> {
   const extractByBody: Record<string, ExtractScript> = {};
-  for (const [body, terms, anchor] of readings) {
+  for (const [body, terms, anchor, inputType] of readings) {
     extractByBody[body] = {
       kind: 'read',
-      reading: { inputType: 'emotion', items: [], terms, anchor },
+      reading: { inputType: inputType ?? 'emotion', items: [], terms, anchor },
     };
   }
   return createFakeProvider({ ...extra, extractByBody });
@@ -2030,6 +2043,569 @@ await check('a catch keeps a conclusion\'s shape, even when the feeling\'s own l
       await store.close();
     }
   });
+});
+
+console.log('\ndomain core — surfacing');
+
+/**
+ * The surfacing rules a check pins, spelled out rather than spread from the
+ * default, for the same reason as `policy`: a check should fail when the rule it
+ * is about changes. The chance is 1 because a matter that may speak speaks on
+ * the first roll — the checks that are about the dice override it.
+ *
+ * The weighting is deliberately **not** here. A shared word is counted the one
+ * way accumulation already counts it, and that switch lives in
+ * `ConclusionPolicy`: two switches for one measurement would drift.
+ */
+function surfacingPolicy(overrides: Partial<SurfacingPolicy> = {}): SurfacingPolicy {
+  return {
+    cooldownMs: 7 * 86_400_000,
+    topicOverlapRatio: 0.5,
+    surfaceChance: 1,
+    ...overrides,
+  };
+}
+
+/** The surfaced payload, or a failed assertion — a `none` result never reaches it. */
+function surfacedOf(result: SurfacingResult): Extract<SurfacingResult, { kind: 'surfaced' }> {
+  assert.equal(result.kind, 'surfaced', `expected a surfacing, got ${JSON.stringify(result)}`);
+  if (result.kind !== 'surfaced') throw new Error('unreachable');
+  return result;
+}
+
+await check('an emotional drop surfaces the conclusion the material has settled into', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = mattersOnly(EXAM_READINGS, {
+        composeConclusionByAnchor: { 好烦: { kind: 'sentence', text: EXAM_SENTENCE } },
+      });
+      // The window is an hour, so the invisible look cannot be what produced a
+      // sentence here: the surfacing's own on-the-spot judgement is the only
+      // thing that can, which is what makes this a check on that judgement. The
+      // dice are pinned to their first face, so the line is the band's first
+      // opening — which is also the frame the portrait shows it in.
+      const domain = createDomain({
+        store,
+        provider,
+        conclusionPolicy: policy({ judgeTiming: 'quiet', quietWindowMs: 3_600_000 }),
+        surfacingPolicy: surfacingPolicy(),
+        random: () => 0,
+      });
+
+      const drops: string[] = [];
+      for (const body of [EXAM_FIRST, EXAM_SECOND, EXAM_THIRD]) {
+        drops.push((await domain.drop(body)).id);
+      }
+      await settleReadings(domain);
+      assert.deepEqual(await domain.listConclusions(), [], 'nothing has been settled yet');
+
+      const surfaced = surfacedOf(await domain.requestSurfacing({ dropId: drops[2] ?? '' }));
+      assert.equal(surfaced.text, `我不太确定：${EXAM_SENTENCE}。`);
+      assert.equal(surfaced.tier, 'weak', 'said in one sitting, so the frame says outright it is unsure');
+      assert.deepEqual(
+        surfaced.support.map((term) => term.text),
+        EXAM_SUPPORT,
+        'the terms behind it, in the user\'s own words',
+      );
+      assert.equal(surfaced.mentions, 3);
+      assert.equal(surfaced.spanDays, 0);
+      assert.ok(Number.isFinite(Date.parse(surfaced.surfacedAt)));
+
+      // What surfaced is the conclusion itself, and the portrait is untouched:
+      // a surfacing shows what was worked out and never rewrites it.
+      const [conclusion] = await domain.listConclusions();
+      assert.equal(surfaced.conclusion.id, conclusion?.id, 'the line is one the portrait already holds');
+      assert.equal(surfaced.conclusion.text, conclusion?.text, 'and the portrait reads the same afterwards');
+      assert.deepEqual(
+        Object.keys(surfaced).sort(),
+        [
+          'averageStrength',
+          'conclusion',
+          'kind',
+          'mentions',
+          'spanDays',
+          'support',
+          'surfacedAt',
+          'text',
+          'tier',
+        ],
+        'and nothing of the scaffolding it was assembled from comes with it',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a question judges on the spot, and is never rolled for', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = mattersOnly(EXAM_READINGS, {
+        composeConclusionByAnchor: { 好烦: { kind: 'sentence', text: EXAM_SENTENCE } },
+      });
+      // Two dials are turned against the user here: the quiet window is an hour,
+      // so nothing has been judged; and the chance is zero, so a die would hold
+      // every surfacing back. An asked-for observation is answered anyway —
+      // "when the user asks, a judgement is run on the spot and never rolled
+      // for". Both halves are asserted in one run, and the die that does still
+      // turn — which opening the line carries — is pinned to its first face.
+      const domain = createDomain({
+        store,
+        provider,
+        conclusionPolicy: policy({ judgeTiming: 'quiet', quietWindowMs: 3_600_000 }),
+        surfacingPolicy: surfacingPolicy({ surfaceChance: 0 }),
+        random: () => 0,
+      });
+
+      for (const body of [EXAM_FIRST, EXAM_SECOND, EXAM_THIRD]) await domain.drop(body);
+      await settleReadings(domain);
+      assert.deepEqual(await domain.listConclusions(), [], 'the invisible look has not happened');
+
+      const surfaced = surfacedOf(await domain.requestSurfacing());
+      assert.equal(surfaced.text, `我不太确定：${EXAM_SENTENCE}。`);
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+/** A fragment with nothing to feel about it, and a matter of its own to open. */
+const NEUTRAL_DROP = '想把论文改成开题报告，先问问导师';
+const NEUTRAL_READING: AnchoredReading = [NEUTRAL_DROP, ['开题报告'], '开题报告', 'decision'];
+
+await check('a drop with no feeling in it is not a moment, and costs no judgement', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = mattersOnly([...EXAM_READINGS, NEUTRAL_READING], {
+        composeConclusionByAnchor: { 好烦: { kind: 'sentence', text: EXAM_SENTENCE } },
+      });
+      const domain = createDomain({
+        store,
+        provider,
+        conclusionPolicy: policy({ judgeTiming: 'count' }),
+        surfacingPolicy: surfacingPolicy(),
+      });
+
+      const drops: string[] = [];
+      for (const body of [EXAM_FIRST, EXAM_SECOND, EXAM_THIRD]) {
+        drops.push((await domain.drop(body)).id);
+      }
+      await readConclusions(domain, 1);
+      const composed = provider.composed.length;
+
+      // There is something eligible to surface, and this drop is still not a
+      // moment: only a feeling, or a question, is.
+      const neutral = await domain.drop(NEUTRAL_DROP);
+      await settleReadings(domain);
+      assert.deepEqual(
+        await domain.requestSurfacing({ dropId: neutral.id }),
+        { kind: 'none', reason: 'not-a-moment' },
+      );
+      assert.equal(provider.composed.length, composed, 'and no look was forced for it');
+
+      assert.deepEqual(
+        await domain.requestSurfacing({ dropId: 'no-such-drop' }),
+        { kind: 'none', reason: 'not-a-moment' },
+        'a drop nobody recorded is not a moment either',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a drop the model read as emotional is a moment, cue words or not', async () => {
+  // The same words, read two ways by the model that read the drop. 「心里堵得慌」
+  // carries a feeling and none of the words the cue list knows, so the only
+  // reading that can hear it is the drop's 输入类型 — and the two runs below say
+  // that is what makes the moment. Both readings are of one fact, and either is
+  // enough: missing a moment costs a judgement the user earned, while an extra
+  // attempt can only ever show what already crossed the threshold and cleared the
+  // cooldown.
+  const body = '心里堵得慌，胸口发闷，说不上来';
+  const said = ['堵得慌', '胸口发闷', '说不上来'];
+  for (const [inputType, expected] of [
+    ['emotion', 'surfaced'],
+    ['decision', 'not-a-moment'],
+  ] as const) {
+    await withDatabase(async (file) => {
+      const store = openSqliteStore(file);
+      try {
+        const provider = createFakeProvider({
+          extractByBody: {
+            [body]: {
+              kind: 'read',
+              reading: { inputType, items: [], terms: said, anchor: '堵得慌' },
+            },
+          },
+          composeConclusionByAnchor: { 堵得慌: { kind: 'sentence', text: EXAM_SENTENCE } },
+        });
+        const domain = createDomain({
+          store,
+          provider,
+          conclusionPolicy: policy({ judgeTiming: 'count' }),
+          surfacingPolicy: surfacingPolicy(),
+          random: () => 0,
+        });
+
+        const drops: string[] = [];
+        for (let time = 0; time < 3; time += 1) drops.push((await domain.drop(body)).id);
+        await readConclusions(domain, 1);
+
+        const result = await domain.requestSurfacing({ dropId: drops[2] ?? '' });
+        assert.equal(
+          result.kind === 'none' ? result.reason : result.kind,
+          expected,
+          `read as ${inputType}`,
+        );
+        if (expected === 'surfaced') {
+          assert.equal(surfacedOf(result).text, `我不太确定：${EXAM_SENTENCE}。`);
+        }
+      } finally {
+        await store.close();
+      }
+    });
+  }
+});
+
+await check('the same topic is not surfaced twice inside the cooldown, and the record is on disk', async () => {
+  await withDatabase(async (file) => {
+    const clock = simulatedClock('2026-09-01T09:00:00.000Z');
+    const provider = mattersOnly([...EXAM_READINGS, EXAM_FOURTH_READING], {
+      composeConclusionByAnchor: { 好烦: { kind: 'sentence', text: EXAM_SENTENCE } },
+    });
+
+    const first = openSqliteStore(file);
+    let fourthId = '';
+    try {
+      const domain = createDomain({
+        store: first,
+        provider,
+        conclusionPolicy: policy({ judgeTiming: 'count' }),
+        surfacingPolicy: surfacingPolicy(),
+        now: clock.now,
+      });
+
+      const drops: string[] = [];
+      for (const body of [EXAM_FIRST, EXAM_SECOND, EXAM_THIRD]) {
+        drops.push((await domain.drop(body)).id);
+      }
+      await readConclusions(domain, 1);
+      assert.equal(surfacedOf(await domain.requestSurfacing({ dropId: drops[2] ?? '' })).mentions, 3);
+
+      // A fourth mention brings a word the matter has not heard, so a second
+      // sentence is assembled — about the same thing, which is the point.
+      clock.advanceDays(1);
+      fourthId = (await domain.drop(EXAM_FOURTH)).id;
+      const conclusions = await readConclusions(domain, 2);
+      assert.equal(conclusions.length, 2, 'there is something new to say, and it is still in cooldown');
+      assert.deepEqual(
+        await domain.requestSurfacing({ dropId: fourthId }),
+        { kind: 'none', reason: 'cooldown' },
+      );
+    } finally {
+      await first.close();
+    }
+
+    // A process that did not make the record reads it back: the cooldown is a
+    // fact about the user's material, not about this run of the program.
+    const second = openSqliteStore(file);
+    try {
+      const domain = createDomain({
+        store: second,
+        provider,
+        conclusionPolicy: policy({ judgeTiming: 'count' }),
+        surfacingPolicy: surfacingPolicy(),
+        now: clock.now,
+      });
+      assert.deepEqual(
+        await domain.requestSurfacing({ dropId: fourthId }),
+        { kind: 'none', reason: 'cooldown' },
+        'the record survived the restart',
+      );
+    } finally {
+      await second.close();
+    }
+  });
+});
+
+/** A fifth mention, once the cooldown has passed: new material to speak about. */
+const EXAM_FIFTH = '期末考到底考哪些题型，好烦';
+const EXAM_FIFTH_READING: AnchoredReading = [EXAM_FIFTH, ['题型', '好烦'], '好烦'];
+
+await check('once the cooldown has passed, the newer conclusion is surfaced', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    const clock = simulatedClock('2026-09-01T09:00:00.000Z');
+    try {
+      const provider = mattersOnly([...EXAM_READINGS, EXAM_FOURTH_READING, EXAM_FIFTH_READING], {
+        composeConclusionByAnchor: { 好烦: { kind: 'sentence', text: EXAM_SENTENCE } },
+      });
+      const domain = createDomain({
+        store,
+        provider,
+        conclusionPolicy: policy({ judgeTiming: 'count' }),
+        surfacingPolicy: surfacingPolicy(),
+        now: clock.now,
+        random: () => 0,
+      });
+
+      const drops: string[] = [];
+      for (const body of [EXAM_FIRST, EXAM_SECOND, EXAM_THIRD]) {
+        drops.push((await domain.drop(body)).id);
+      }
+      await readConclusions(domain, 1);
+      surfacedOf(await domain.requestSurfacing({ dropId: drops[2] ?? '' }));
+
+      clock.advanceDays(1);
+      await domain.drop(EXAM_FOURTH);
+      await readConclusions(domain, 2);
+
+      // Past the window, and the matter has grown meanwhile: what surfaces is
+      // the sentence as it stands now, not the one from a week ago.
+      clock.advanceDays(8);
+      const fifth = await domain.drop(EXAM_FIFTH);
+      const conclusions = await readConclusions(domain, 3);
+      const surfaced = surfacedOf(await domain.requestSurfacing({ dropId: fifth.id }));
+
+      assert.equal(surfaced.conclusion.id, conclusions[2]?.id, 'the newest sentence is the one shown');
+      assert.equal(surfaced.tier, 'medium', 'seven terms over nine days is not hedged by the frame any more');
+      assert.equal(surfaced.text, `听起来，${EXAM_SENTENCE}。`);
+      assert.equal(surfaced.mentions, 5);
+      assert.equal(surfaced.spanDays, 9);
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+/** Three mentions over four days, so the frame adds no hedge of its own. */
+async function mediumBandDrops(
+  domain: Domain,
+  clock: ReturnType<typeof simulatedClock>,
+): Promise<readonly string[]> {
+  const drops: string[] = [];
+  drops.push((await domain.drop(EXAM_FIRST)).id);
+  clock.advanceDays(4);
+  drops.push((await domain.drop(EXAM_SECOND)).id);
+  drops.push((await domain.drop(EXAM_THIRD)).id);
+  await readConclusions(domain, 1);
+  return drops;
+}
+
+await check('a sentence that reads as a fact is still spoken in the product\'s own uncertainty', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    const clock = simulatedClock('2026-09-01T09:00:00.000Z');
+    try {
+      // A medium-band sentence carries whatever hedge the model wrote, and this
+      // one wrote none: it is a verdict, not an observation. The portrait keeps it
+      // as it was written; the surfacing moment puts the band's own opening in
+      // front of it. Nothing here checks the sentence for a word — that cannot be
+      // read off a string, and `parent-voice-principles.md` says so — the
+      // uncertainty is written in.
+      const provider = mattersOnly(EXAM_READINGS, {
+        composeConclusionByAnchor: { 好烦: { kind: 'sentence', text: '你最近被几件事压着' } },
+      });
+      const domain = createDomain({
+        store,
+        provider,
+        conclusionPolicy: policy({ judgeTiming: 'count' }),
+        surfacingPolicy: surfacingPolicy(),
+        now: clock.now,
+        random: () => 0,
+      });
+
+      const drops = await mediumBandDrops(domain, clock);
+      const conclusions = await domain.listConclusions();
+      assert.equal(conclusions[0]?.tier, 'medium');
+      assert.equal(conclusions[0]?.text, '你最近被几件事压着。', 'the frame added nothing — the model was to hedge');
+
+      const surfaced = surfacedOf(await domain.requestSurfacing({ dropId: drops[2] ?? '' }));
+      assert.equal(surfaced.text, '听起来，你最近被几件事压着。', 'the band speaks, and the sentence is still the model\'s');
+      assert.equal(
+        (await domain.listConclusions())[0]?.text,
+        '你最近被几件事压着。',
+        'while the portrait is left exactly as it was assembled',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('the register is a form, not one phrase: the same band is worded differently twice', async () => {
+  // Two rolls of the same dice over the same material, and the same band both
+  // times. A check written around one phrase — 「你似乎」, say — could not tell
+  // these apart from a product that had stopped choosing.
+  for (const [roll, opening] of [
+    [0, '听起来，'],
+    [0.99, '似乎，'],
+  ] as const) {
+    await withDatabase(async (file) => {
+      const store = openSqliteStore(file);
+      const clock = simulatedClock('2026-09-01T09:00:00.000Z');
+      try {
+        const provider = mattersOnly(EXAM_READINGS, {
+          composeConclusionByAnchor: { 好烦: { kind: 'sentence', text: '你最近被几件事压着' } },
+        });
+        const domain = createDomain({
+          store,
+          provider,
+          conclusionPolicy: policy({ judgeTiming: 'count' }),
+          surfacingPolicy: surfacingPolicy(),
+          now: clock.now,
+          random: () => roll,
+        });
+
+        const drops = await mediumBandDrops(domain, clock);
+        const surfaced = surfacedOf(await domain.requestSurfacing({ dropId: drops[2] ?? '' }));
+        assert.equal(surfaced.tier, 'medium', 'the band never moves with the wording');
+        assert.equal(surfaced.text, `${opening}你最近被几件事压着。`);
+      } finally {
+        await store.close();
+      }
+    });
+  }
+});
+
+await check('the dice may hold a surfacing back', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = mattersOnly(EXAM_READINGS, {
+        composeConclusionByAnchor: { 好烦: { kind: 'sentence', text: EXAM_SENTENCE } },
+      });
+      const domain = createDomain({
+        store,
+        provider,
+        conclusionPolicy: policy({ judgeTiming: 'count' }),
+        surfacingPolicy: surfacingPolicy({ surfaceChance: 0.5 }),
+        random: () => 0.99,
+      });
+
+      const drops: string[] = [];
+      for (const body of [EXAM_FIRST, EXAM_SECOND, EXAM_THIRD]) {
+        drops.push((await domain.drop(body)).id);
+      }
+      await readConclusions(domain, 1);
+      assert.deepEqual(
+        await domain.requestSurfacing({ dropId: drops[2] ?? '' }),
+        { kind: 'none', reason: 'held-back' },
+        'this turn is one the product chose not to use',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('too little to claim anything means there is nothing to push', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const body = '今天又在改提纲，好烦';
+      const provider = mattersOnly([[body, ['改提纲', '好烦'], '好烦']], {
+        byBody: { [body]: { kind: 'reply', reply: '那样真好。' } },
+        composeConclusionByAnchor: SENTENCE_BY_FEELING,
+      });
+      const domain = createDomain({
+        store,
+        provider,
+        conclusionPolicy: policy({ judgeTiming: 'quiet', quietWindowMs: 50 }),
+        surfacingPolicy: surfacingPolicy(),
+      });
+
+      const drops: string[] = [];
+      for (let time = 0; time < 3; time += 1) drops.push((await domain.drop(body)).id);
+      const [caught] = await readConclusions(domain, 1);
+      assert.equal(caught?.kind, 'catch', 'two terms is not something to make a claim from');
+
+      assert.deepEqual(
+        await domain.requestSurfacing({ dropId: drops[2] ?? '' }),
+        { kind: 'none', reason: 'nothing-to-say' },
+        'a catch asserts nothing, so there is nothing to push at the user',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+/**
+ * Two matters whose supports share two words that turn up in both, and nothing
+ * else. The distinct words are what keep them apart while they accumulate; what
+ * the cooldown has to judge is whether sharing 好烦 and 好累 is evidence that
+ * these are the same thing.
+ */
+const SHARED_A1 = '期末怎么算分，好烦，好累';
+const SHARED_A2 = '平时分 40% 也搞不清，好烦，好累';
+const SHARED_B1 = '室友半夜打游戏，好累';
+const SHARED_B2 = '室友打游戏到半夜，好烦，好累';
+const SHARED_READINGS: readonly AnchoredReading[] = [
+  [SHARED_A1, ['期末怎么算分', '好烦', '好累'], '好烦'],
+  [SHARED_A2, ['平时分 40%', '好烦', '好累'], '好烦'],
+  [SHARED_B1, ['室友', '打游戏', '好累'], '好累'],
+  [SHARED_B2, ['室友', '打游戏', '好烦', '好累'], '好累'],
+];
+const SHARED_SENTENCES = {
+  好烦: { kind: 'sentence', text: EXAM_SENTENCE },
+  好累: { kind: 'sentence', text: '听起来你最近一直没缓过来' },
+} as const;
+
+/** Both matters raised three times, and surfaced once between them. */
+async function surfaceSharedMatters(
+  weightSharedBySpread: boolean,
+): Promise<{ readonly firstConclusion: string | undefined; readonly second: SurfacingResult }> {
+  let second: SurfacingResult = { kind: 'none', reason: 'nothing-to-say' };
+  let firstConclusion: string | undefined;
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = mattersOnly(SHARED_READINGS, {
+        composeConclusionByAnchor: SHARED_SENTENCES,
+      });
+      const domain = createDomain({
+        store,
+        provider,
+        conclusionPolicy: policy({ judgeTiming: 'count', weightSharedBySpread }),
+        surfacingPolicy: surfacingPolicy(),
+        random: () => 0,
+      });
+
+      const aDrops: string[] = [];
+      for (const body of [SHARED_A1, SHARED_A2, SHARED_A2]) aDrops.push((await domain.drop(body)).id);
+      const bDrops: string[] = [];
+      for (const body of [SHARED_B1, SHARED_B2, SHARED_B2]) bDrops.push((await domain.drop(body)).id);
+      const conclusions = await readConclusions(domain, 2);
+      assert.equal(conclusions.length, 2, 'the two matters stay two');
+
+      firstConclusion = surfacedOf(await domain.requestSurfacing({ dropId: aDrops[2] ?? '' })).conclusion.id;
+      second = await domain.requestSurfacing({ dropId: bDrops[2] ?? '' });
+    } finally {
+      await store.close();
+    }
+  });
+  return { firstConclusion, second };
+}
+
+await check('a word that turns up in every matter is not evidence that two are the same', async () => {
+  const { firstConclusion, second } = await surfaceSharedMatters(true);
+  assert.equal(second.kind, 'surfaced', 'the second matter has something of its own to say');
+  assert.notEqual(surfacedOf(second).conclusion.id, firstConclusion, 'and it is not the one already shown');
+  assert.equal(surfacedOf(second).text, '我不太确定：听起来你最近一直没缓过来。');
+});
+
+await check('with the weighting off, the same two words are enough — the misfire it prevents', async () => {
+  // The matters still stay two while they accumulate (their own words are what
+  // attach a fragment to a matter), so what this pins is the cooldown's rubic:
+  // counting a shared word once per matter instead of by its rarity calls two
+  // different things the same, and the user never hears the second one.
+  const { second } = await surfaceSharedMatters(false);
+  assert.deepEqual(second, { kind: 'none', reason: 'cooldown' });
 });
 
 console.log('\ndomain core — recall');

@@ -404,6 +404,106 @@ export interface RecallOptions {
 }
 
 /**
+ * Why nothing was surfaced.
+ *
+ * Zero is an ordinary outcome, never an error (`spec.md`, 浮现). The reasons are
+ * kept apart because they are different facts about the product: a drop that was
+ * not a moment at all, material that has not settled into anything sayable,
+ * something sayable that the user has already heard this week, and a turn the
+ * product chose not to use. The page shows nothing for any of them — surfacing
+ * does not push — so these are for the domain and its checks, not for the user.
+ */
+export type SurfacingMiss =
+  /**
+   * This drop was not one the product speaks after.
+   *
+   * Only a drop carrying a feeling, or a question the user asked, is. Kept apart
+   * from `nothing-to-say` because it is a fact about the moment rather than about
+   * the material: there may be plenty to say and this is still not when.
+   */
+  | 'not-a-moment'
+  /**
+   * The material has not settled into a judgement.
+   *
+   * Either no matter has crossed the threshold, or the newest thing a matter
+   * settled into is a **catch** — which asserts nothing, so there is nothing to
+   * put in front of the user as an observation.
+   */
+  | 'nothing-to-say'
+  /** Everything sayable has already been said within the cooldown — the same topic, inside seven days. */
+  | 'cooldown'
+  /** There was something to say, and this is a turn the product did not use — see `SurfacingPolicy.surfaceChance`. */
+  | 'held-back';
+
+/**
+ * What came of asking the product to speak first.
+ *
+ * A discriminated union rather than an optional conclusion, because **zero is a
+ * result**: "nothing this time" and "here is the one line" are different
+ * outcomes and a caller should have to have decided which it got.
+ *
+ * Every number beside the sentence is one its wording was read off — the same
+ * three a conclusion carries — so "why did it say that back then" stays
+ * answerable about the moment it was said, not only about the portrait.
+ */
+export type SurfacingResult =
+  | {
+      /** One conclusion was shown to the user. */
+      readonly kind: 'surfaced';
+      /**
+       * The line the user reads: the conclusion's own sentence, in the wording
+       * its band owns.
+       *
+       * The product decides how firmly it may speak — that is what the band was
+       * read off — and it writes that in front of the sentence rather than
+       * judging the sentence's tone, because whether a line "reads as an
+       * assertion" cannot be decided from the string. The conclusion in the
+       * portrait is left exactly as it was assembled; what differs here is the
+       * layer around it, and the same band may be worded differently twice.
+       */
+      readonly text: string;
+      /** The band its wording was read off. Never null: only a claim is ever surfaced. */
+      readonly tier: ConclusionTier;
+      /** The conclusion that was shown, so the portrait can be read against it. */
+      readonly conclusion: ConclusionRef;
+      /** The terms behind it, in the user's own words and in the order said. */
+      readonly support: readonly NamedTerm[];
+      /** How many times the matter had been raised when it was assembled. */
+      readonly mentions: number;
+      /** How long it had spanned, as the band was read. */
+      readonly spanDays: number;
+      /** How tightly its support connected to the feeling it is about. */
+      readonly averageStrength: number;
+      /** When it was shown, as an ISO-8601 string. */
+      readonly surfacedAt: string;
+    }
+  | {
+      /** Nothing was shown, which is a normal outcome and not a failure. */
+      readonly kind: 'none';
+      /** Which of the ordinary reasons applies. */
+      readonly reason: SurfacingMiss;
+    };
+
+/**
+ * What raised the moment a surfacing is being asked for.
+ *
+ * A named object rather than a positional argument for the same reason as
+ * `RecallOptions`: the reading travels through the page, the API and the core,
+ * and naming it once keeps that path legible.
+ */
+export interface SurfacingOptions {
+  /**
+   * The drop that just arrived, when a drop is what raised the moment.
+   *
+   * Omitted when the user asked directly. The two are **not** the same trigger:
+   * a drop has to carry a feeling to be a moment at all, and whether this turn is
+   * used is rolled for; a question is always put to the material and always
+   * answered, and is never rolled for.
+   */
+  readonly dropId?: string;
+}
+
+/**
  * The domain core.
  *
  * Ticket 01 opened exactly one operation: **dropping**. Ticket 02 opened what
@@ -413,10 +513,14 @@ export interface RecallOptions {
  * question of those records and being told both the answer and which drop it
  * came from. Ticket 05 opens what the accumulation settles into: when a matter
  * has been raised enough times, it becomes a **conclusion**, and the portrait is
- * the set of those conclusions. The remaining operations named in the spec's
- * interface (surfacing, scheduling, deletion, and what the user may do to a
- * conclusion) arrive with their own tickets — this interface grows, it does not
- * get pre-declared with stubs that would fake behaviour.
+ * the set of those conclusions. Ticket 06 opens the one moment the product speaks
+ * first: a conclusion may be **surfaced** — shown to the user on a drop that
+ * carries a feeling, or when the user asks — at most one per turn, never twice
+ * for the same topic inside a week, and only if it is stated as an observation
+ * rather than as a fact. The remaining operations named in the spec's interface
+ * (scheduling, deletion, and what the user may do to a conclusion) arrive with
+ * their own tickets — this interface grows, it does not get pre-declared with
+ * stubs that would fake behaviour.
  */
 export interface Domain {
   /**
@@ -499,6 +603,32 @@ export interface Domain {
    * @returns every conclusion, oldest first.
    */
   listConclusions(): Promise<readonly Conclusion[]>;
+
+  /**
+   * Ask the product to **surface** one thing it has worked out.
+   *
+   * Two triggers, and only two (`CONTEXT.md`, 浮现): a drop that carries a
+   * feeling, and a question the user asked. Every other drop is not a moment, and
+   * the answer is `not-a-moment` rather than silence-by-accident.
+   *
+   * What it returns is at most one conclusion, and **zero is a normal result** —
+   * the material may not have settled into anything sayable, the same topic may
+   * have been shown inside the last seven days, or the product may simply not use
+   * this turn. None of those is an error, and the page shows nothing for any of
+   * them: surfacing never pushes.
+   *
+   * Both triggers judge **on the spot** before answering, because the moment is
+   * the user's and what they see may not be stale — the last few fragments have
+   * to be counted. The difference is the dice: whether a drop's turn is used is
+   * rolled for, while a question is always put to the material and never rolled
+   * for.
+   *
+   * Every surfacing is recorded, so the cooldown holds across a restart.
+   *
+   * @param options - the drop that raised the moment, or nothing when the user asked.
+   * @returns the one conclusion shown, or the ordinary reason there is none.
+   */
+  requestSurfacing(options?: SurfacingOptions): Promise<SurfacingResult>;
 
   /**
    * Run extraction on a drop that has not been read yet, and report the outcome.

@@ -271,6 +271,21 @@ export function mayClaim(supportCount: number, policy: ConclusionPolicy): boolea
 }
 
 /**
+ * A sentence with its closing punctuation taken off.
+ *
+ * Exported because two places have to agree on where the sentence ends: the
+ * band's frame around it, and the **surfacing**'s own opening in front of it.
+ * Agreeing by sharing this rather than by each stripping its own way is what
+ * keeps a conclusion and the moment it is shown as the same sentence.
+ *
+ * @param sentence - the sentence, as the provider wrote it.
+ * @returns it, trimmed, with any run of closing punctuation removed.
+ */
+export function bareSentence(sentence: string): string {
+  return sentence.trim().replace(/[。.！!？?…]+$/u, '');
+}
+
+/**
  * The band's frame, applied by code around the sentence's own words.
  *
  * This is the one place a band turns into wording, and it is code rather than an
@@ -290,14 +305,16 @@ export function mayClaim(supportCount: number, policy: ConclusionPolicy): boolea
  * the conclusion, whether one band gets several openings — belongs to ticket 06,
  * and belongs *around* this sentence rather than inside it: a conclusion is part
  * of the chain and is never rewritten, so its wording is not a place to keep a
- * decision that changes per surfacing.
+ * decision that changes per surfacing. Ticket 06 therefore keeps the sentence
+ * beside this framed line (see `StoredConclusion.claim`) and writes its own
+ * opening in front of it, rather than reading a frame back out of the text.
  *
  * @param tier - the band the numbers earned.
  * @param base - the sentence itself, without a closing full stop.
  * @returns what the user reads.
  */
 export function frameFor(tier: ConclusionTier, base: string): string {
-  const sentence = base.trim().replace(/[。.！!？?…]+$/u, '');
+  const sentence = bareSentence(base);
   if (tier === 'weak') return `我不太确定：${sentence}。`;
   if (tier === 'strong') return `这段时间我看到一条线：${sentence}。`;
   return `${sentence}。`;

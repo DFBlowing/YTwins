@@ -34,6 +34,7 @@ import type {
   StoredLink,
   StoredMatter,
   StoredSettlement,
+  StoredSurfacing,
   StoredTerm,
   TermVector,
 } from './storage.ts';
@@ -90,6 +91,14 @@ import type {
  * Their keys cascade so ticket 09's deletion leaves no orphan behind: deleting a
  * drop takes its place in a matter, and deleting the term a matter was opened
  * around takes the matter and every conclusion that came out of it.
+ *
+ * Ticket 06 adds one more, and it is a record rather than an inference:
+ * `surfacing_` remembers that a conclusion was **shown**, which is what keeps a
+ * topic quiet for a week — across restarts, and on the user's own terms rather
+ * than the running process's. It cascades with its conclusion: a judgement that
+ * is gone cannot have been shown. The same ticket adds `conclusion_.claim`: the
+ * sentence the provider wrote, kept beside the framed line rather than recovered
+ * from it, because the surfacing moment writes its own opening in front of it.
  */
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS drop_ (
@@ -168,6 +177,7 @@ CREATE INDEX IF NOT EXISTS matter_drop_by_matter ON matter_drop_ (matter_id);
 CREATE TABLE IF NOT EXISTS conclusion_ (
   id           TEXT PRIMARY KEY,
   matter_id    TEXT NOT NULL REFERENCES matter_(id) ON DELETE CASCADE,
+  claim        TEXT,
   text         TEXT NOT NULL,
   kind         TEXT NOT NULL,
   tier         TEXT,
@@ -189,6 +199,14 @@ CREATE TABLE IF NOT EXISTS conclusion_support_ (
 );
 
 CREATE INDEX IF NOT EXISTS conclusion_support_by_term ON conclusion_support_ (term_id);
+
+CREATE TABLE IF NOT EXISTS surfacing_ (
+  id            TEXT PRIMARY KEY,
+  conclusion_id TEXT NOT NULL REFERENCES conclusion_(id) ON DELETE CASCADE,
+  surfaced_at   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS surfacing_by_conclusion ON surfacing_ (conclusion_id);
 
 CREATE TABLE IF NOT EXISTS settle_state_ (
   id            INTEGER PRIMARY KEY CHECK (id = 1),
@@ -237,6 +255,7 @@ interface MatterDropRow {
 interface ConclusionRow {
   readonly id: string;
   readonly matter_id: string;
+  readonly claim: string | null;
   readonly text: string;
   readonly kind: string;
   readonly tier: string | null;
@@ -252,6 +271,13 @@ interface ConclusionRow {
 interface ConclusionSupportRow {
   readonly conclusion_id: string;
   readonly term_id: string;
+}
+
+/** A surfacing row as SQLite hands it back. */
+interface SurfacingRow {
+  readonly id: string;
+  readonly conclusion_id: string;
+  readonly surfaced_at: string;
 }
 
 /** The settlement state row. */
@@ -399,6 +425,7 @@ function toStoredConclusion(
   return {
     id: row.id,
     matterId: row.matter_id,
+    claim: row.claim,
     text: row.text,
     kind,
     tier,
@@ -456,6 +483,11 @@ export function openSqliteStore(file: string): DropStore {
   // carried here too so a migrated file behaves like a fresh one: deleting the
   // term a drop was about leaves the drop, with nothing to accumulate around.
   ensureColumn(db, 'drop_', 'anchor_term_id', 'TEXT REFERENCES term_(id) ON DELETE SET NULL');
+  // Ticket 06's column, for a file written by ticket 05. Null is ordinary: a
+  // catch has no sentence of its own, and a conclusion assembled before this
+  // column existed has none either — such a conclusion is simply never surfaced,
+  // which is the honest reading of a sentence nobody kept the words of.
+  ensureColumn(db, 'conclusion_', 'claim', 'TEXT');
 
   const insertDrop = db.prepare('INSERT INTO drop_ (id, body, dropped_at, reply) VALUES (?, ?, ?, ?)');
   const selectDrops = db.prepare(
@@ -553,11 +585,11 @@ export function openSqliteStore(file: string): DropStore {
 
   const insertConclusion = db.prepare(
     `INSERT INTO conclusion_
-       (id, matter_id, text, kind, tier, relation, supersedes, created_at, mentions, span_days, avg_strength)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, matter_id, claim, text, kind, tier, relation, supersedes, created_at, mentions, span_days, avg_strength)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const selectConclusions = db.prepare(
-    `SELECT id, matter_id, text, kind, tier, relation, supersedes, created_at, mentions, span_days, avg_strength
+    `SELECT id, matter_id, claim, text, kind, tier, relation, supersedes, created_at, mentions, span_days, avg_strength
        FROM conclusion_ ORDER BY created_at ASC, rowid ASC`,
   );
   const selectConclusionSupport = db.prepare(
@@ -566,6 +598,16 @@ export function openSqliteStore(file: string): DropStore {
   const insertConclusionSupport = db.prepare(
     `INSERT INTO conclusion_support_ (conclusion_id, term_id, position) VALUES (?, ?, ?)
      ON CONFLICT DO NOTHING`,
+  );
+
+  // Ticket 06's statements. A surfacing's support is not stored beside it: it is
+  // the support of the conclusion that was shown, and a second copy of that set
+  // could only ever disagree with the first.
+  const insertSurfacing = db.prepare(
+    'INSERT INTO surfacing_ (id, conclusion_id, surfaced_at) VALUES (?, ?, ?)',
+  );
+  const selectSurfacings = db.prepare(
+    'SELECT id, conclusion_id, surfaced_at FROM surfacing_ ORDER BY surfaced_at ASC, rowid ASC',
   );
 
   const selectSettlement = db.prepare(
@@ -846,6 +888,7 @@ export function openSqliteStore(file: string): DropStore {
         insertConclusion.run(
           id,
           conclusion.matterId,
+          conclusion.claim,
           conclusion.text,
           conclusion.kind,
           conclusion.tier,
@@ -868,6 +911,31 @@ export function openSqliteStore(file: string): DropStore {
         throw error;
       }
       return { ...conclusion, id };
+    },
+
+    async listSurfacings(): Promise<readonly StoredSurfacing[]> {
+      const rows = selectSurfacings.all() as unknown as SurfacingRow[];
+      const support = supportByConclusion();
+      return rows.map((row) => ({
+        id: row.id,
+        conclusionId: row.conclusion_id,
+        surfacedAt: row.surfaced_at,
+        // The support of the conclusion that was shown, in the order it was
+        // said: the cooldown is measured on what stood behind the line the user
+        // actually read, and this is that set.
+        supportTermIds: support.get(row.conclusion_id) ?? [],
+      }));
+    },
+
+    async recordSurfacing(conclusionId: string, at: string): Promise<StoredSurfacing> {
+      const id = randomUUID();
+      insertSurfacing.run(id, conclusionId, at);
+      return {
+        id,
+        conclusionId,
+        surfacedAt: at,
+        supportTermIds: supportByConclusion().get(conclusionId) ?? [],
+      };
     },
 
     async readSettlement(): Promise<StoredSettlement> {

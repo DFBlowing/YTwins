@@ -1,12 +1,11 @@
 /*
- * The three-act skeleton's browser entry.
+ * The three-act page's browser entry.
  *
- * Only act three is unwired: acts one and two run real paths. A drop really
- * posts, really lands in the local database, and really answers; a question
- * really searches the stored originals and comes back either with an answer and
- * the drop it came from, or with a plain "found nothing". Act three is an empty
- * container — it holds no fake data and claims nothing it does not do — and is
- * filled in by ticket 06.
+ * All three acts run real paths. A drop really posts, really lands in the local
+ * database, and really answers; a question really searches the stored originals
+ * and comes back either with an answer and the drop it came from, or with a plain
+ * "found nothing"; and the product really speaks first, once, when a drop carries
+ * a feeling or when the user asks.
  *
  * Nothing here holds a credential of any kind; the browser never sees one.
  *
@@ -45,6 +44,16 @@
  * so its sentence appears on a later load rather than in this one. There is
  * nothing here for the user to press: settling needs no participation, which is
  * the whole point of the feature.
+ *
+ * What act three shows after ticket 06: the one moment the product speaks first.
+ * An emotional drop, or a question, makes the domain try to **surface** a
+ * conclusion — at most one, never the same topic twice in a week, and never a
+ * sentence that reads as a fact. The page shows what came of the attempt, and a
+ * zero answer is shown as an ordinary outcome rather than as a fault: the attempt
+ * failing to find a moment or a sayable thing is normal, while being unable to
+ * ask at all is its own line, because those are different facts. The line itself
+ * is never the page's to word — the conclusion was already written, and surfacing
+ * picks which one, not how it reads.
  */
 
 /** One item parsed out of a drop, as the server reports it. */
@@ -157,6 +166,30 @@ type RecallResult =
   | { readonly kind: 'not-found' }
   | { readonly kind: 'unavailable' };
 
+/**
+ * The outcome of asking the product to speak first, as the server reports it.
+ *
+ * Mirrors the domain's union, so the page cannot render a line without having
+ * established that one exists — and cannot confuse "there was nothing to say this
+ * time" (ordinary) with "the question could not be put to the material at all".
+ */
+type SurfacingResult =
+  | {
+      readonly kind: 'surfaced';
+      readonly text: string;
+      readonly tier: 'weak' | 'medium' | 'strong';
+      readonly conclusion: ConclusionRef;
+      readonly support: readonly NamedTerm[];
+      readonly mentions: number;
+      readonly spanDays: number;
+      readonly averageStrength: number;
+      readonly surfacedAt: string;
+    }
+  | {
+      readonly kind: 'none';
+      readonly reason: 'not-a-moment' | 'nothing-to-say' | 'cooldown' | 'held-back';
+    };
+
 function mustFind<T extends Element>(selector: string): T {
   const found = document.querySelector<T>(selector);
   if (found === null) throw new Error(`页面缺失元素：${selector}`);
@@ -167,6 +200,7 @@ const form = mustFind<HTMLFormElement>('#drop-form');
 const input = mustFind<HTMLTextAreaElement>('#drop-input');
 const send = mustFind<HTMLButtonElement>('#drop-send');
 const reply = mustFind<HTMLParagraphElement>('#drop-reply');
+const surfacedInline = mustFind<HTMLParagraphElement>('#drop-surface');
 const list = mustFind<HTMLUListElement>('#drop-list');
 const empty = mustFind<HTMLParagraphElement>('#drop-empty');
 const linkList = mustFind<HTMLUListElement>('#link-list');
@@ -185,6 +219,19 @@ const answerText = mustFind<HTMLParagraphElement>('#ask-answer-text');
 const sourceList = mustFind<HTMLUListElement>('#ask-source-list');
 const notFound = mustFind<HTMLParagraphElement>('#ask-not-found');
 const unavailable = mustFind<HTMLParagraphElement>('#ask-unavailable');
+
+const surfaceForm = mustFind<HTMLFormElement>('#surface-form');
+const surfaceInput = mustFind<HTMLTextAreaElement>('#surface-input');
+const surfaceSend = mustFind<HTMLButtonElement>('#surface-send');
+const surfaceAgain = mustFind<HTMLButtonElement>('#surface-again');
+const surfaceAgainHint = mustFind<HTMLSpanElement>('#surface-again-hint');
+const surfaceReply = mustFind<HTMLParagraphElement>('#surface-reply');
+const surfaceAsk = mustFind<HTMLButtonElement>('#surface-ask');
+const surfaceMiss = mustFind<HTMLParagraphElement>('#surface-miss');
+const surfaceResult = mustFind<HTMLElement>('#surface-result');
+const surfaceText = mustFind<HTMLParagraphElement>('#surface-text');
+const surfaceWhy = mustFind<HTMLParagraphElement>('#surface-why');
+const surfaceSupport = mustFind<HTMLUListElement>('#surface-support');
 
 /** How many times to ask whether a fresh drop has been read, and how often. */
 const POLL_ATTEMPTS = 40;
@@ -217,6 +264,26 @@ const REPLY_GRACE_POLLS = 4;
  * brings it back.
  */
 const LINK_GRACE_POLLS = 4;
+
+/**
+ * How many extra rounds to give a **surfacing** attempt after a drop.
+ *
+ * The attempt judges on the spot, but the drop it is about may still be being
+ * read: extraction, the terms, the attachment into a matter and the reply are
+ * separate background jobs, and the page cannot see which have landed. Reading
+ * the drop back tells it extraction is done, which is *before* the attachment —
+ * so a surfacing asked for at that moment may not yet see the fragment it is
+ * about. Rather than guess at a delay, the attempt is repeated: asking again
+ * costs nothing, an attempt that found nothing writes nothing down, and once
+ * something has surfaced, asking again is answered `cooldown` — so the same line
+ * can never arrive twice.
+ *
+ * Deliberately short. Each attempt judges on the spot (`settle`), which is the
+ * moment being the user's rather than the invisible look's — but repeating it
+ * more than a couple of times would be judging a pile over and over to no end,
+ * so the wait is over in well under a second and giving up costs nothing.
+ */
+const SURFACE_GRACE_POLLS = 3;
 
 /** Format a due time in Chinese terms, or say plainly that none was found. */
 function formatDue(dueAt: string | null): string {
@@ -353,12 +420,21 @@ function render(drops: readonly DropSummary[]): void {
   empty.hidden = drops.length > 0;
 }
 
-async function loadDrops(): Promise<readonly DropSummary[]> {
+/** The drops recorded so far, or null when the server could not answer. */
+async function readDrops(): Promise<readonly DropSummary[] | null> {
   const response = await fetch('/api/drops');
-  if (!response.ok) return [];
+  if (!response.ok) return null;
   const payload = (await response.json()) as { drops: DropSummary[] };
-  render(payload.drops);
   return payload.drops;
+}
+
+async function loadDrops(): Promise<readonly DropSummary[]> {
+  // A read that failed leaves the list as it was rather than claiming the user
+  // never dropped anything — "we could not read it" and "there is nothing" are
+  // different facts, the same distinction act two draws.
+  const drops = (await readDrops().catch(() => null)) ?? [];
+  render(drops);
+  return drops;
 }
 
 /**
@@ -399,12 +475,14 @@ async function settleAccumulation(): Promise<void> {
  * How firmly the sentence was allowed to speak, in the words the page shows.
  *
  * A catch is not a weak claim: it is the substitute for one, so it says so
- * rather than taking a band it never earned.
+ * rather than taking a band it never earned. A surfacing is never a catch — one
+ * asserts nothing, so there is nothing in it to push — which is why the band is
+ * the whole story there.
  */
-function bandLabel(conclusion: Conclusion): string {
-  if (conclusion.kind === 'catch') return '承接';
-  if (conclusion.tier === 'strong') return '强档';
-  if (conclusion.tier === 'medium') return '中档';
+function bandLabel(kind: 'claim' | 'catch', tier: 'weak' | 'medium' | 'strong' | null): string {
+  if (kind === 'catch') return '承接';
+  if (tier === 'strong') return '强档';
+  if (tier === 'medium') return '中档';
   return '弱档';
 }
 
@@ -414,13 +492,19 @@ function bandLabel(conclusion: Conclusion): string {
  * The sentence is a judgement, and the whole reason its wording was mapped from
  * numbers instead of chosen by a model is so this answer can be given later.
  * "被提起 N 次" is the threshold's unit; the span and the connection strength are
- * what the band was read from.
+ * what the band was read from. Shared by the portrait and the surfacing, because
+ * it is the same four numbers either way.
  */
-function whySpoken(conclusion: Conclusion): string {
-  const mentioned = `被提起 ${conclusion.mentions} 次`;
-  const terms = `${conclusion.support.length} 个词条`;
-  const spanned = `跨 ${conclusion.spanDays} 天`;
-  const tied = `平均连接 ${conclusion.averageStrength.toFixed(2)}`;
+function whySpoken(spoken: {
+  readonly mentions: number;
+  readonly spanDays: number;
+  readonly averageStrength: number;
+  readonly support: readonly NamedTerm[];
+}): string {
+  const mentioned = `被提起 ${spoken.mentions} 次`;
+  const terms = `${spoken.support.length} 个词条`;
+  const spanned = `跨 ${spoken.spanDays} 天`;
+  const tied = `平均连接 ${spoken.averageStrength.toFixed(2)}`;
   return `${mentioned} · ${terms} · ${spanned} · ${tied}`;
 }
 
@@ -446,7 +530,7 @@ function renderConclusion(conclusion: Conclusion): HTMLLIElement {
 
   const band = document.createElement('span');
   band.className = 'conclusion-band';
-  band.textContent = bandLabel(conclusion);
+  band.textContent = bandLabel(conclusion.kind, conclusion.tier);
 
   const when = document.createElement('time');
   when.className = 'conclusion-when';
@@ -551,6 +635,115 @@ async function settleDrop(dropId: string, pending: string): Promise<DropSummary 
   return latest;
 }
 
+/**
+ * Post one drop and settle everything it sets off.
+ *
+ * The three jobs behind a drop — reading it, wording its reply, settling and
+ * linking what it added — are each given their moment, in the order they depend
+ * on one another: reading first, because everything else is about what was read.
+ *
+ * @param body - the text to drop, exactly as typed.
+ * @returns the drop's id and its line, or null when the drop itself failed.
+ */
+async function postDrop(body: string): Promise<{ readonly id: string; readonly reply: string } | null> {
+  const response = await fetch('/api/drop', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ body }),
+  });
+  if (!response.ok) return null;
+  const payload = (await response.json()) as { id: string; reply: string };
+
+  await loadDrops();
+  const settled = await settleDrop(payload.id, payload.reply);
+  await settleAccumulation();
+  return { id: payload.id, reply: settled?.reply ?? payload.reply };
+}
+
+/**
+ * Ask the product to speak first.
+ *
+ * A `null` return means the question could not be put to the material at all,
+ * which is deliberately not the same fact as "there was nothing to say" — the
+ * same distinction act two draws. The domain holds the two triggers and the
+ * cooldown, so nothing here decides whether this is a moment.
+ *
+ * @param dropId - the drop that raised the moment, or nothing when the user asked.
+ * @returns what came of the attempt, or null when the server could not answer.
+ */
+async function askToSurface(dropId?: string): Promise<SurfacingResult | null> {
+  const response = await fetch('/api/surface', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(dropId === undefined ? {} : { dropId }),
+  });
+  if (!response.ok) return null;
+  return (await response.json()) as SurfacingResult;
+}
+
+/**
+ * Ask for a surfacing about a drop that has just been made.
+ *
+ * See `SURFACE_GRACE_POLLS`: the attempt may land before the drop has been
+ * attached to the material it belongs to, so "nothing to say" is the one answer
+ * worth asking about again. Every other answer is a settled fact about the user's
+ * material and will not change by asking.
+ *
+ * @param dropId - the drop that raised the moment.
+ * @returns what came of the attempt, or null when the server could not answer.
+ */
+async function surfaceAfterDrop(dropId: string): Promise<SurfacingResult | null> {
+  let result = await askToSurface(dropId);
+  for (let attempt = 0; attempt < SURFACE_GRACE_POLLS; attempt += 1) {
+    if (result === null || result.kind === 'surfaced') return result;
+    if (result.reason !== 'nothing-to-say') return result;
+    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+    result = await askToSurface(dropId);
+  }
+  return result;
+}
+
+/** What a zero answer means, in words the page can show. */
+function missLine(reason: 'not-a-moment' | 'nothing-to-say' | 'cooldown' | 'held-back'): string {
+  if (reason === 'cooldown') return '这件事 7 天内已经浮过一次了，先不重复。';
+  if (reason === 'nothing-to-say') return '还没有沉淀到能说出口的一句。';
+  // Not a moment, or a turn the product chose not to use. Both are the product
+  // keeping quiet, and naming which one would be showing the user its internals.
+  return '这次先不说。';
+}
+
+/** Show what act three's attempt came to. */
+function renderSurfacing(result: SurfacingResult | null): void {
+  surfaceResult.hidden = true;
+  surfaceMiss.hidden = true;
+
+  if (result === null) {
+    // Nothing was asked. Reusing the "there was nothing to say" line here would
+    // tell the user something about their own material that nobody looked at.
+    surfaceMiss.textContent = '这次没能问到，稍后再试试。';
+    surfaceMiss.hidden = false;
+    return;
+  }
+
+  if (result.kind === 'none') {
+    surfaceMiss.textContent = missLine(result.reason);
+    surfaceMiss.hidden = false;
+    return;
+  }
+
+  surfaceText.textContent = result.text;
+  surfaceWhy.textContent = `为什么这么说：${whySpoken(result)}`;
+  surfaceSupport.replaceChildren(
+    ...result.support.map((term) => {
+      const chip = document.createElement('li');
+      chip.className = 'term-chip';
+      chip.textContent = term.text;
+      return chip;
+    }),
+  );
+  surfaceResult.hidden = false;
+}
+
 /** Format a moment as a value a `datetime-local` input accepts (local time). */
 function toLocalInputValue(when: Date): string {
   const pad = (value: number): string => String(value).padStart(2, '0');
@@ -640,40 +833,115 @@ form.addEventListener('submit', (event) => {
 
   send.disabled = true;
   reply.textContent = '';
+  surfacedInline.hidden = true;
 
   void (async () => {
     try {
-      const response = await fetch('/api/drop', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ body }),
-      });
-      if (!response.ok) {
-        const problem = (await response.json()) as { error?: string };
-        reply.textContent = problem.error ?? '没接住，再试一次。';
+      const dropped = await postDrop(body);
+      if (dropped === null) {
+        reply.textContent = '没接住，再试一次。';
         return;
       }
-      const payload = (await response.json()) as { id: string; reply: string };
-      reply.textContent = payload.reply;
+      reply.textContent = dropped.reply;
       input.value = '';
 
-      // The drop is already caught at this point. What is still running is
-      // reading it and wording the reply, so the list is refreshed once both
-      // have had their chance — and the line above the form is replaced by the
-      // one the drop actually settled on.
-      await loadDrops();
-      const settled = await settleDrop(payload.id, payload.reply);
-      if (settled !== null) reply.textContent = settled.reply;
-
-      // Terms arrive with the reading, and what they connect to — and what they
-      // add up to — is decided after it, so the accumulation is read last, with
-      // a moment for the work that is still in flight behind the reading.
-      await settleAccumulation();
+      // The moment the product may speak first. Act one shows the line without
+      // the evidence behind it — that belongs to the portrait below — and shows
+      // nothing at all when there is nothing to say, because surfacing never
+      // pushes.
+      const surfaced = await surfaceAfterDrop(dropped.id);
+      if (surfaced !== null && surfaced.kind === 'surfaced') {
+        surfacedInline.textContent = surfaced.text;
+        surfacedInline.hidden = false;
+      }
+      await refreshSurfaceAgain();
     } catch {
       reply.textContent = '连不上本地服务。';
     } finally {
       send.disabled = false;
     }
+  })();
+});
+
+/**
+ * Point act three's repeat button at the material this database actually holds.
+ *
+ * The third act is "say the same thing until it is the third time", because the
+ * threshold counts mentions. Rather than keep a second copy of the preset
+ * sentence in the page — which would drift from the provider's script and quietly
+ * turn the demo into nothing — the button re-drops the first thing the user
+ * really dropped, read back from the store.
+ */
+async function refreshSurfaceAgain(): Promise<void> {
+  const first = (await readDrops().catch(() => null))?.[0];
+  if (first === undefined) {
+    surfaceAgain.disabled = true;
+    surfaceAgainHint.textContent = '先在「丢」里丢一句。';
+    return;
+  }
+  surfaceAgain.disabled = false;
+  surfaceAgainHint.textContent = `同一句：${first.body}`;
+}
+
+/** Drop one fragment from act three, and show what came of it. */
+async function surfaceFromDrop(body: string): Promise<void> {
+  if (body.trim().length === 0) return;
+  surfaceSend.disabled = true;
+  surfaceAgain.disabled = true;
+  surfaceReply.textContent = '';
+  surfaceResult.hidden = true;
+  surfaceMiss.hidden = true;
+
+  try {
+    const dropped = await postDrop(body);
+    if (dropped === null) {
+      surfaceReply.textContent = '没接住，再试一次。';
+      return;
+    }
+    surfaceReply.textContent = dropped.reply;
+    surfaceInput.value = '';
+    renderSurfacing(await surfaceAfterDrop(dropped.id));
+    await refreshSurfaceAgain();
+  } catch {
+    surfaceReply.textContent = '连不上本地服务。';
+  } finally {
+    surfaceSend.disabled = false;
+    surfaceAgain.disabled = false;
+  }
+}
+
+surfaceForm.addEventListener('submit', (event) => {
+  event.preventDefault();
+  void surfaceFromDrop(surfaceInput.value);
+});
+
+surfaceAgain.addEventListener('click', () => {
+  void (async () => {
+    const first = (await readDrops().catch(() => null))?.[0];
+    if (first === undefined) {
+      await refreshSurfaceAgain();
+      return;
+    }
+    await surfaceFromDrop(first.body);
+  })();
+});
+
+surfaceAsk.addEventListener('click', () => {
+  surfaceAsk.disabled = true;
+  surfaceResult.hidden = true;
+  surfaceMiss.hidden = true;
+
+  void (async () => {
+    let result: SurfacingResult | null = null;
+    try {
+      result = await askToSurface();
+    } catch {
+      // A fetch that never reached the server is not an answer about the user's
+      // material, so it is reported as "could not ask" rather than as silence.
+      result = null;
+    }
+    renderSurfacing(result);
+    surfaceAsk.disabled = false;
   })();
 });
 
@@ -724,3 +992,4 @@ for (const tab of document.querySelectorAll<HTMLButtonElement>('.act-tab')) {
 void loadDrops();
 void loadLinks();
 void loadConclusions();
+void refreshSurfaceAgain();

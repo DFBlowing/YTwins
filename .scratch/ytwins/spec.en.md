@@ -283,6 +283,13 @@ reply is"), not storage-shaped ones (no tables, no id assembly, no SQL). At mini
 - **Surfacing timing and cooldown**: attempted only on an emotional drop or a user-initiated question; the same topic
   cools down for 7 days; at most one item per turn. The engineering definition of **topic** is "semantic overlap
   between the supporting term sets" — overlap above an internal ratio counts as the same topic.
+  > **Corrected 2026-09-16 (when 06 landed)**: "an emotional drop" is read **two ways, either of which is enough** —
+  > the emotion cues code can see, **or** the **input type** the model gave that drop being emotional. The shape of the
+  > uncertain register is settled too: it is not read back out of the sentence by asking whether it "is stated as an
+  > assertion" (that cannot be done — see the same clause in `parent-voice-principles.md`), it is **written in**: the
+  > band is mapped from the three numbers above, and at the surfacing moment code picks one of that band's own openings
+  > to put in front of the sentence. The cooldown's **record** (`surfacing_`) becomes an entity with it. The full
+  > account is in [`issues/06`](./issues/06-surfacing.en.md) under `## Comments`.
 - **Cascade delete**: two steps — preview the number of affected conclusions and state it explicitly, then execute per
   the user's choice; storage enforces it with foreign-key cascades so no orphans remain, and the text of a deleted
   drop no longer appears in any recall result.

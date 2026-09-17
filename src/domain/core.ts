@@ -35,6 +35,19 @@
  * for is the sentence — and silence is a legitimate answer to that question,
  * because a conclusion nobody could compose must never become a worse one.
  *
+ * Ticket 06 gives that conclusion its one visible moment. **Surfacing** is the
+ * product speaking first, into a silence nobody asked it to fill, so it is
+ * hedged twice over: it happens only on a drop that carries a feeling or on a
+ * question the user asked, and only a claim — a conclusion that asserts
+ * something, with the sentence it was written from kept beside its framed line —
+ * may be shown. What the moment decides is how firmly to speak and which sentence
+ * to show; what it may not do is decide what was observed. The uncertainty is
+ * written in by code rather than looked for in the sentence (`surfacing.ts`),
+ * because assertion-ness cannot be read off a string, and the conclusion's own
+ * line in the portrait is left exactly as it was assembled. The same topic waits
+ * seven days, and every surfacing is written down where the cooldown can find it
+ * after a restart.
+ *
  * @module domain/core
  */
 
@@ -42,6 +55,7 @@ import type { AiProvider, ExtractResult } from './ai-provider.ts';
 import {
   CONCLUSION_INSTRUCTIONS,
   DEFAULT_CONCLUSION_POLICY,
+  bareSentence,
   checkConclusion,
   frameFor,
   mayClaim,
@@ -66,6 +80,9 @@ import type {
   RecallOptions,
   RecallResult,
   RecallSource,
+  SurfacingMiss,
+  SurfacingOptions,
+  SurfacingResult,
   Term,
   TermLink,
 } from './interface.ts';
@@ -98,6 +115,12 @@ import type {
   StoredMatter,
   StoredTerm,
 } from './storage.ts';
+import {
+  DEFAULT_SURFACING_POLICY,
+  isSameTopic,
+  surfacingLine,
+  type SurfacingPolicy,
+} from './surfacing.ts';
 
 /** How many times a provider is asked to answer one drop. One attempt, one retry. */
 const REPLY_ATTEMPTS = 2;
@@ -149,6 +172,25 @@ export interface DomainCoreOptions {
    * `DEFAULT_CONCLUSION_POLICY`.
    */
   readonly conclusionPolicy?: ConclusionPolicy;
+  /**
+   * What the visible moment may do: how long a topic stays quiet, how much
+   * overlap makes two supports one topic, and how often a turn is used.
+   *
+   * The same shape as `linkPolicy` and `conclusionPolicy`, for the same reasons:
+   * every number here is a value rather than a finding, so a caller has to be
+   * able to pin a different one — which is also how a seven-day cooldown is
+   * checkable without waiting a week.
+   */
+  readonly surfacingPolicy?: SurfacingPolicy;
+  /**
+   * A number in `[0, 1)`, the way `Math.random` gives one.
+   *
+   * The domain's only source of chance, and it exists because chance is part of
+   * the product here: whether a turn that could speak uses it, and which of the
+   * conclusions it could show is shown. Injectable for the same reason as `now` —
+   * a check that had to hope for a roll would not be a check.
+   */
+  readonly random?: () => number;
   /**
    * The moment the domain is working from, as an ISO-8601 string.
    *
@@ -290,6 +332,40 @@ function newestFeeling(matter: StoredMatter): StoredMatter['drops'][number] | nu
 }
 
 /**
+ * One conclusion a moment could show.
+ *
+ * The band and the sentence travel beside the conclusion rather than being read
+ * off it again later: a stored conclusion may hold a null tier (which is the
+ * honest record of a **catch**) and a null claim (one assembled before the words
+ * were kept beside the line), and what may be shown is a claim with both. Naming
+ * the narrowed view once is what keeps "a catch is never surfaced" and "a
+ * conclusion nobody kept the sentence of is never surfaced" from being
+ * re-derived in every branch that touches a candidate.
+ */
+interface ShowableConclusion {
+  /** The stored conclusion, unchanged. */
+  readonly conclusion: StoredConclusion;
+  /** The band its wording is written in. Never null: only a claim is ever shown. */
+  readonly tier: ConclusionTier;
+  /** The sentence the provider wrote, without the frame. Never null. */
+  readonly claim: string;
+}
+
+/** What a moment has to show, as `readySurfacings` reports it. */
+type ReadySurfacings =
+  | {
+      /** Something may be shown. */
+      readonly kind: 'ready';
+      /** What may be shown, never empty — "nothing" is the other arm. */
+      readonly candidates: readonly [ShowableConclusion, ...ShowableConclusion[]];
+    }
+  | {
+      /** Nothing may be shown, for one of the ordinary reasons. */
+      readonly kind: 'none';
+      readonly reason: SurfacingMiss;
+    };
+
+/**
  * Build the domain core.
  *
  * @param options - the store, and optionally an AI provider.
@@ -299,7 +375,41 @@ export function createDomain(options: DomainCoreOptions): Domain {
   const { store, provider } = options;
   const linkPolicy = options.linkPolicy ?? DEFAULT_LINK_POLICY;
   const conclusionPolicy = options.conclusionPolicy ?? DEFAULT_CONCLUSION_POLICY;
+  const surfacingPolicy = options.surfacingPolicy ?? DEFAULT_SURFACING_POLICY;
   const now = options.now ?? ((): string => new Date().toISOString());
+  const random = options.random ?? ((): number => Math.random());
+
+  /**
+   * How widely each wording is spread across the matters, and what sharing it is
+   * therefore worth.
+   *
+   * One reading, because two rules ask the same question — "is this the same
+   * thing?" — and they have to answer it the same way: `attach` asks it about a
+   * fragment arriving, and the surfacing moment asks it about something the user
+   * may already have heard. A word counted as generic in one place and specific
+   * in the other would let a topic be judged the same going in and different
+   * coming out.
+   *
+   * Spread is measured across **matters rather than mentions**: a word said ten
+   * times about one thing is still specific to that thing, which is exactly the
+   * distinction the weighting is for.
+   *
+   * @param matters - every matter as it stands.
+   * @returns what a shared wording is worth, from `spreadWeight`.
+   */
+  function spreadWeigher(matters: readonly StoredMatter[]): (termId: string) => number {
+    const spread = new Map<string, number>();
+    for (const matter of matters) {
+      for (const termId of matter.supportTermIds) {
+        spread.set(termId, (spread.get(termId) ?? 0) + 1);
+      }
+    }
+    // A term the map does not mention is in no matter yet, and a wording no
+    // matter has claimed is fully specific — so the same 1 the weight gives a
+    // term said only here, rather than a missing measurement.
+    return (termId: string): number =>
+      spreadWeight(spread.get(termId) ?? 0, conclusionPolicy);
+  }
 
   /**
    * Every decision about a look, and every look itself, runs through here.
@@ -689,20 +799,9 @@ export function createDomain(options: DomainCoreOptions): Domain {
       const anchor = said.find((term) => term.id === anchorTermId) ?? null;
       const saidIds = said.map((term) => term.id);
 
-      // How widely each wording is spread, measured across matters rather than
-      // mentions: a word said ten times about one thing is still specific to
-      // that thing, which is exactly the distinction the weighting is for.
-      const spread = new Map<string, number>();
-      for (const matter of matters) {
-        for (const termId of matter.supportTermIds) {
-          spread.set(termId, (spread.get(termId) ?? 0) + 1);
-        }
-      }
-      // A term the map does not mention is in no matter yet, and a wording no
-      // matter has claimed is fully specific — so the same 1 the weight gives a
-      // term said only here, rather than a missing measurement.
-      const weight = (termId: string): number =>
-        spreadWeight(spread.get(termId) ?? 0, conclusionPolicy);
+      // What sharing a wording is worth, read the one way both rules read it —
+      // see `spreadWeigher`.
+      const weight = spreadWeigher(matters);
 
       let best: { matterId: string; value: number } | null = null;
       for (const matter of matters) {
@@ -847,6 +946,7 @@ export function createDomain(options: DomainCoreOptions): Domain {
         let text: string;
         let kind: ConclusionKind;
         let tier: ConclusionTier | null;
+        let claim: string | null;
 
         if (!mayClaim(matter.supportTermIds.length, conclusionPolicy)) {
           // Too little to say anything about a pattern: catch the newest feeling
@@ -859,6 +959,10 @@ export function createDomain(options: DomainCoreOptions): Domain {
           text = catching;
           kind = 'catch';
           tier = null;
+          // Nothing of its own was written: what a catch holds is the line the
+          // newest feeling was already answered with, which is already stored
+          // with that drop.
+          claim = null;
         } else {
           const newestTerm =
             newest?.anchorTermId === null || newest === null
@@ -873,10 +977,15 @@ export function createDomain(options: DomainCoreOptions): Domain {
           text = frameFor(band, sentence);
           kind = 'claim';
           tier = band;
+          // The sentence is kept beside the framed line, so the moment the product
+          // speaks first can write its own opening in front of it rather than
+          // reading one back out of a string.
+          claim = bareSentence(sentence);
         }
 
         await store.appendConclusion({
           matterId: matter.id,
+          claim,
           text,
           kind,
           tier,
@@ -996,6 +1105,96 @@ export function createDomain(options: DomainCoreOptions): Domain {
       });
     }, conclusionPolicy.quietWindowMs);
     if (typeof quietTimer.unref === 'function') quietTimer.unref();
+  }
+
+  /**
+   * Whether a drop is one the product speaks after.
+   *
+   * Two readings of one fact, and either one is enough: the text carries a
+   * feeling, as ordinary code reads it (`readSituation` — the same reading that
+   * chose the drop's line), or the model that read the drop judged it an
+   * emotional input, which is the product's own 输入类型 (`CONTEXT.md`).
+   *
+   * Either rather than both, because the two mistakes do not cost the same.
+   * Missing a moment means a judgement the user earned is never shown to them;
+   * an extra attempt can only ever surface something that already crossed the
+   * threshold and cleared the cooldown, so it costs nothing at all. A cue list is
+   * also a partial reading by construction — 「心里堵得慌」 carries a feeling and
+   * none of the words the list knows — which is exactly the gap the model's
+   * classification covers.
+   *
+   * @param drop - the drop the moment is being asked about.
+   * @returns true when the product may speak after this drop.
+   */
+  function isAMoment(drop: StoredDrop): boolean {
+    if (drop.inputType === 'emotion') return true;
+    return readSituation(drop.body).emotionPresent;
+  }
+
+  /**
+   * Everything this moment could **show**.
+   *
+   * Read from the conclusions, and only what the moment is allowed to say:
+   *
+   *  - **The newest conclusion of each matter.** An earlier one has been carried
+   *    on from, and showing it would put the user back where they were rather
+   *    than where they are. A matter whose newest conclusion is a **catch** has
+   *    nothing sayable in it: a catch asserts nothing (`CONTEXT.md`, 承接), so
+   *    there is no observation in it to put in front of someone — and adding
+   *    uncertainty to one would be the dishonesty in the other direction.
+   *  - **Only a claim whose sentence was kept.** What a surfacing reads is the
+   *    sentence the provider wrote, with the band's own opening in front of it
+   *    (`surfacingLine`); a conclusion assembled before those words were kept
+   *    beside the line has no sentence to write an opening for.
+   *  - **Not a topic the user has heard this week.** The cooldown is measured
+   *    from the moments lines were shown, on the terms that stood behind them.
+   *
+   * Whether the sentence is *stated as an observation* is deliberately not a
+   * filter here: that cannot be read off a string (see `surfacing.ts`), so the
+   * uncertainty is written in rather than looked for.
+   *
+   * @param at - the moment being judged, ISO-8601.
+   * @returns what may be shown, or the ordinary reason nothing may.
+   */
+  async function readySurfacings(at: string): Promise<ReadySurfacings> {
+    const conclusions = await store.listConclusions();
+    if (conclusions.length === 0) return { kind: 'none', reason: 'nothing-to-say' };
+
+    // The newest conclusion per matter, and the map keeps the order the matters
+    // were first concluded in, so a turn that could say several things does not
+    // depend on the order they happen to come back in.
+    const latest = new Map<string, StoredConclusion>();
+    for (const conclusion of conclusions) latest.set(conclusion.matterId, conclusion);
+
+    const weight = spreadWeigher(await store.listMatters());
+    const cooling = (await store.listSurfacings()).filter(
+      (record) => Date.parse(at) - Date.parse(record.surfacedAt) < surfacingPolicy.cooldownMs,
+    );
+
+    const candidates: ShowableConclusion[] = [];
+    let sayable = 0;
+    for (const conclusion of latest.values()) {
+      // A claim always carries the band its wording was read off and the sentence
+      // it was written from. A row missing either is one the domain cannot
+      // describe, and a line nobody can explain is not one to push at the user.
+      if (conclusion.kind !== 'claim') continue;
+      const { tier, claim } = conclusion;
+      if (tier === null || claim === null) continue;
+      sayable += 1;
+      const heard = cooling.some((record) =>
+        isSameTopic(conclusion.supportTermIds, record.supportTermIds, weight, surfacingPolicy),
+      );
+      if (heard) continue;
+      candidates.push({ conclusion, tier, claim });
+    }
+
+    const [first, ...rest] = candidates;
+    if (first === undefined) {
+      // Kept apart because they are different facts about the user: nothing has
+      // settled into a judgement, or it has and they have heard it this week.
+      return { kind: 'none', reason: sayable === 0 ? 'nothing-to-say' : 'cooldown' };
+    }
+    return { kind: 'ready', candidates: [first, ...rest] };
   }
 
   /** Assemble one drop with its items and terms, or null when there is none. */
@@ -1214,6 +1413,68 @@ export function createDomain(options: DomainCoreOptions): Domain {
           .filter((term): term is StoredTerm => term !== undefined)
           .map(toNamedTerm),
       }));
+    },
+
+    async requestSurfacing(options?: SurfacingOptions): Promise<SurfacingResult> {
+      // The trigger, read before anything else runs. A drop the product does not
+      // speak after is not a moment, and no look is forced on its account — see
+      // `isAMoment` for what makes one.
+      const dropId = options?.dropId;
+      if (dropId !== undefined) {
+        const drop = await store.findDrop(dropId);
+        // A drop nobody recorded is not a moment either: nothing arrived to
+        // speak after.
+        if (drop === null || !isAMoment(drop)) {
+          return { kind: 'none', reason: 'not-a-moment' };
+        }
+      }
+
+      // Judged now rather than whenever the invisible look would have come round:
+      // the moment is the user's, and what they are about to read has to count
+      // the last few fragments. It goes through the one look queue, so two
+      // attempts in the same breath cannot each spend the alternation's turn.
+      await queueLook(settle);
+
+      const at = now();
+      const ready = await readySurfacings(at);
+      if (ready.kind === 'none') return ready;
+
+      // The dice, and the whole of the mystery: whether this turn is used at all,
+      // which of the things that could be said is said, and which of that band's
+      // openings the line carries. A question is never rolled for — the user
+      // asked, and "not this time" is not an answer to a question — so the chance
+      // applies to a drop.
+      if (dropId !== undefined && random() >= surfacingPolicy.surfaceChance) {
+        return { kind: 'none', reason: 'held-back' };
+      }
+      const candidates = ready.candidates;
+      // A roll below 1 always names one of them; the fallback keeps a caller that
+      // breaks that contract from turning "show one" into "show none".
+      const chosen = candidates[Math.floor(random() * candidates.length)] ?? candidates[0];
+
+      // Written down before it is handed back, so the cooldown is a fact about
+      // the user from the moment they have read the line.
+      await store.recordSurfacing(chosen.conclusion.id, at);
+
+      const terms = new Map((await store.listTerms()).map((term) => [term.id, term]));
+      return {
+        kind: 'surfaced',
+        // The sentence the provider wrote, in the band's own opening. The
+        // conclusion is not rewritten: its framed line stays in the portrait, and
+        // what changes per surfacing is the layer code owns — how firmly the
+        // product speaks, never what it observed.
+        text: surfacingLine(chosen.tier, chosen.claim, random()),
+        tier: chosen.tier,
+        conclusion: { id: chosen.conclusion.id, text: chosen.conclusion.text },
+        support: chosen.conclusion.supportTermIds
+          .map((termId) => terms.get(termId))
+          .filter((term): term is StoredTerm => term !== undefined)
+          .map(toNamedTerm),
+        mentions: chosen.conclusion.mentions,
+        spanDays: chosen.conclusion.spanDays,
+        averageStrength: chosen.conclusion.averageStrength,
+        surfacedAt: at,
+      };
     },
 
     async extract(dropId: string): Promise<DropSummary | null> {

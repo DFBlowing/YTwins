@@ -372,6 +372,104 @@ body {
   border-radius: 0.6rem;
 }
 
+/* Surfacing (06). The line the product speaks first, drawn like a conclusion in
+   the portrait — because it is one — but set apart from everything the user
+   said: this is the only place the product starts a conversation. */
+.surfaced {
+  margin: 1.25rem 0 0;
+  padding: 1rem 1.15rem;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 0.6rem;
+  background: #fff;
+}
+
+/* Act one's copy of the line, under the drop's reply: no border and no label,
+   because it belongs to that drop rather than being a section of its own. */
+.surfaced-inline {
+  border: 0;
+  border-left: 3px solid var(--accent);
+  border-radius: 0;
+  background: none;
+  padding: 0 0 0 0.75rem;
+  font-size: 1.05rem;
+  word-break: break-word;
+}
+
+.surfaced-label {
+  margin: 0;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--ink-soft);
+}
+
+.surfaced-text {
+  margin: 0.5rem 0 0;
+  font-size: 1.15rem;
+  word-break: break-word;
+}
+
+.surfaced-why {
+  margin: 0.4rem 0 0;
+  font-size: 0.8rem;
+  color: var(--ink-soft);
+}
+
+.surfaced-support {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0.6rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* Before a drop, act three has nothing to repeat — the button and its hint are
+   one line, so the hint reads as part of it rather than as an error. */
+.surface-repeat {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem 0.75rem;
+  margin: 1.25rem 0 0;
+}
+
+.surface-again {
+  padding: 0.45rem 0.9rem;
+  border: 1px solid var(--accent);
+  border-radius: 0.5rem;
+  background: #fff;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+
+.surface-again:disabled {
+  border-color: var(--line);
+  color: var(--ink-soft);
+  cursor: default;
+}
+
+.surface-again-hint {
+  font-size: 0.8rem;
+  color: var(--ink-soft);
+  word-break: break-word;
+}
+
+.surface-form {
+  margin-top: 1.25rem;
+}
+
+.surface-ask {
+  margin-top: 1rem;
+}
+
+.surface-miss {
+  margin: 1rem 0 0;
+  color: var(--ink-soft);
+}
+
 /* Act two: asking. */
 
 .ask-form {

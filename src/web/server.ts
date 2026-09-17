@@ -162,6 +162,29 @@ export function createHandler(domain: Domain) {
       return;
     }
 
+    // Ask the product to **surface** one thing it has worked out. Two triggers
+    // reach here — a drop that just happened, and the user's own question — and
+    // the domain decides whether this is a moment at all, so a request for a
+    // turn that is not one comes back 200 with an ordinary reason rather than an
+    // error status. Zero answers are normal (cooling down, or nothing sayable
+    // yet), and turning them into failures would push the page towards showing a
+    // problem where the honest outcome is silence.
+    if (request.method === 'POST' && url === '/api/surface') {
+      try {
+        const parsed = JSON.parse(await readBody(request)) as { dropId?: unknown };
+        const dropId = typeof parsed.dropId === 'string' ? parsed.dropId : '';
+        const result = await domain.requestSurfacing(
+          dropId.length > 0 ? { dropId } : undefined,
+        );
+        sendJson(response, 200, result);
+      } catch (error) {
+        sendJson(response, 500, {
+          error: error instanceof Error ? error.message : '浮现失败',
+        });
+      }
+      return;
+    }
+
     // Everything the page already dropped — this is what survives a refresh.
     if (request.method === 'GET' && url === '/api/drops') {
       try {
