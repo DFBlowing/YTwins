@@ -132,24 +132,51 @@ _最后更新：2026-09-17_
   `/code-review` 两轴已过：**改了**端口词汇倒置（追溯那端改名 `composeRecallAnswer`，`composeAnswer` 归 11）、
   两处重复（抽出 `composeChecked`、字数上限插值）、答案不认 10 的退档、e2e 的空断言、两个旋钮没人钉；
   **保留并写明理由**的是退路形状、band 按并集读、demo 素材（垂直切片）—— 逐条见 ticket 11 的 `## Comments`。
-- **01–11 全部完成**；`12`–`13` 仍是 `Status: ready-for-agent`。
+- **12 已实现**，`Status: ready-for-human`：**真实 provider** —— 端口那八个方法全部有了真实实现
+  （云端 LLM 走 OpenAI 兼容端点 + JSON 输出；embedding 在本机 CPU 上离线跑）。新增 `src/ai/`
+  （**port 的实现侧**，`src/` 下第三个顶层目录，已给 spec 补带日期的更正：它既不是领域逻辑也不是界面层，
+  而且换手机端时 `src/web/` 退场、它要留下）：`config.ts`（环境变量 → 四种组合，**不认识的值拒绝启动**）、
+  `env-file.ts`（读仓库根的 `.env`，环境变量优先）、`openai-chat.ts`（`/chat/completions` +
+  `response_format: json_object` + 超时 + 无 key 时**不发** Authorization 头）、`structured.ts`/`errors.ts`
+  （把 JSON 找出来并**逐字段**核对，失败必指名哪次调用、哪个字段、拿到什么）、`llm-provider.ts`（七个操作）、
+  `local-embedding.ts`/`cloud-embedding.ts`/`vectors.ts`、`real-provider.ts`（**哪一半没配好，那一半每个
+  调用都以原因失败，另一半照常工作**）、`src/web/provider.ts`（真实 / demo 的唯一次定）。
+  **默认走真实，`YTwins_PROVIDER=demo` 才用 01–11 的假 provider**（开工前问过作者；`demo-provider.ts` 因此
+  **没有**按 NEXT 原计划退场）。key 只存仓库根 `.env`（早已 gitignore），实测任何 `/api/*` 响应都不含它。
+  **手工冒烟 9/9**（真实 DeepSeek 端点 + 本地 embedding，`npm run smoke`），并起真实服务器手工过了一整条
+  （投递 → 抽出 1 事项 5 词条、「下周三」算成 `2026-09-23` → 追溯 `answered` 带 1 条出处 → 浮现
+  `nothing-to-say` → 13 条同次投递硬边）。领域测试 **152/152 一行未改**、新增 `src/ai/provider.test.ts`
+  **56/56**（`npm run test:ai`，fetch 与模型加载器都是注入的，全程不联网）、02–06 与 08–11 的 e2e 全绿、
+  `tsc` 全绿、`vite build` 成功、`check-workspace` clean。`/code-review` 两轴已过：**改了** `composeAnswer`
+  里塞了通用人设（**这会让 11 的保证当场失效**，已去掉并补强成逐行审视 system，实测把 bug 放回去就红）、
+  `unavailable()` 的安全声明不成立（现在 `satisfies` 真正钉住穷尽性）、超时常量与超时判断各两份、
+  `Embedder` 长在实现里、`what` 参数名、取不到的默认值与四处 `kind === 'cloud'` 分支、三处可选参数展开；
+  **保留并写明理由**的是单文件测试脚手架各一份、两个入口各自写「读 .env → 解析 → 退出」——
+  逐条见 ticket 12 的 `## Comments`。
+- **01–12 全部完成**；只剩 `13` 仍是 `Status: ready-for-agent`。
 
 这个仓库的第一个 effort slug 是 `ytwins`（`.scratch/ytwins/`、`docs/ytwins/`）。将来另开 effort 时再取新 slug。
 
 ## 下一步
 
-1. **`11` 已完成（2026-09-17）** —— 下一张按顺序是 **`12`**（真实 provider：云端 LLM + 本地 embedding）。
-   **严格按编号顺序串行推进**，见下「串行推进（2026-09-15 更正）」。
-   12 要站在 11 留下的两件事上：① 端口现在有 **8 个**方法（`respond` / `extract` / `embed` / `judgeLink` /
-   `composeConclusion` / `composeAnswer` / `parseQuestion` / `composeRecallAnswer`），真实实现要**逐个**落地，
-   `composeAnswer` 的输入只有用户自己的结论与词条（服务端不要再往里塞通用人设，那会当场推翻 11 的保证）；
-   注意 `composeRecallAnswer` 是**追溯**那端（答的是**事实**），别与 `composeAnswer`（**答案**，答的是**判断**）
-   混起来 —— 这一对名字是 11 按 `CONTEXT.md` 摆正的；② demo 的预置素材现在是**两条额外投递片段**
-   （`DEMO_GUITAR` / `DEMO_SLEEP`），换真实 provider 时它们连同 `demo-provider.ts` 一起退场，
-   别把预置素材当成领域数据搬进 `src/domain/`。
-2. spec 里留了一处**只有人能做**的事：申请并填入云端 LLM 的 API key（服务端环境变量文件）。别把它写进
-   agent 的实现 ticket，必要时用 `/wizard` 生成交互脚本。它在 **12** 动手之前必须就位 —— 01–11 全用假 provider，
-   不需要 key。
+1. **`12` 已完成（2026-09-17）** —— 下一张按顺序是 **`13`**（三幕 demo 填实：把第二幕与第三幕接到真实
+   链路上）。**严格按编号顺序串行推进**，见下「串行推进（2026-09-15 更正）」。
+2. **13 动手之前先处理一件事：`LinkPolicy` 的阈值没有对着真实 embedding 标定过。** 12 的实测数据：
+   `Xenova/multilingual-e5-small` 的余弦分布**很挤** —— 相关对 0.88–0.91、不相关对 0.84–0.88
+   （`query: ` 前缀；三组样本：「期末怎么算分 × 平时分 40%」= 0.895、「想学吉他 × 琴行的帖子」= 0.882、
+   「好烦 × 想学吉他」= 0.835），而 `linking.ts` 的默认三段式是「≥ 0.85 直连 / ≤ 0.7 不连 / 中间问
+   `judgeLink`」。**真实服务器上已经抓到一条假链接**：`琴行的帖子 × 下周三交提纲 = 0.852 → 直连`。
+   另一个候选 `Xenova/bge-small-zh-v1.5` 的分布是 0.37–0.63（用今天的阈值会一条都不连）。
+   spec 把「阈值 / 灰区边界 / 主题重叠比例」明确列为**尚未定值的参数**，所以这**不是 12 的 bug，也不是
+   13 的边角料**：要么把灰区放宽、让 `judgeLink` 去判（三段式的设计意图，代价是每个灰对多一次调用，
+   而一次调用很便宜），要么换分布更开的 embedding。**别让第三幕浮出一条旁边挂着假链接的小结论。**
+3. **`YTwins_PROVIDER=demo` 还在。** 12 保留它是因为三幕 demo 需要可重复、可离线（作者拍板）。13 做三幕
+   时要决定：demo 走真实 provider（要 key、要花钱、每次结果略有不同）还是 `YTwins_PROVIDER=demo`
+   （预置素材、可重复）。**两个都跑一遍**再定，别默默选一个。
+4. spec 里那处**只有人能做**的事（云端 LLM 的 API key）已经在 2026-09-17 就位：仓库根 `.env` 一行
+   `YTwins_LLM_API_KEY=…`（`.env` 不进 git，模板是 `.env.example`）。第一把 key 其实是别家的
+   （`api.deepseek.com` 返 401、`opencode.ai/zen/go/v1` 要 `x-opencode-session`），换过一把 ——
+   过程见 ticket 12 的 `## Comments` 第 4 条。
 
 ## 在 01 里踩到的坑（下一张 ticket 会再遇到）
 
@@ -159,8 +186,14 @@ _最后更新：2026-09-17_
 - **`node --test` 用不了**（要 spawn），本机 Node v22.23.2 的 type stripping 是 **strip-only**（枚举之类
   用不了）。所以领域测试是**自带断言、退出码表达结果**的单文件入口：`node src/domain/domain.test.ts`。
 - **改用 `node:sqlite` 而不是 `better-sqlite3`**（v22.5+ 内置，零运行时依赖，外键级联可用）。
-- **别用 PowerShell 做「读进来—改—写回去」的批量文本替换** —— 会把中文和长破折号编码搞坏（01 里踩过一次，
-  靠 `Select-String -Pattern '閳|锛|鈥|锟'` 揪出来）。要批量改就用 `edit` 工具逐处改。
+- **别用 PowerShell 做「读进来—改—写回去」的批量文本替换** —— 会把中文和长破折号编码搞坏
+  （01 里踩过一次，靠 `Select-String -Pattern '閳|锛|鈥|锟'` 揪出来；**12 里又踩了一次**：
+  对 `src/ai/config.ts` 做 `-replace` 把中文错误文案写成了 `鐜鍙橀噺`）。**要批量改就用 `edit` 工具逐处改。**
+  补两条 12 学到的：① 恢复办法不是「再改回去」，而是**用 `write` 工具整份重写**；② 分辨中文字有没有坏
+  **要用 `read` 工具**（它按 UTF-8 正确解码），`Get-Content` 的输出在中文控制台上本来就长这样，
+  看不出来。**另一个反向的坑（12 实测）**：`AbortSignal.timeout()` 的定时器**不会**让事件循环保持存活，
+  纯等它的测试会在触发前就退出（Node 退出码 13、一条 FAIL 都不打印）—— 测试里要另拿一个 `setTimeout`
+  把循环撑住（`provider.test.ts` 的「a model that never answers」那条就是）。
 
 ## prototype 的位置（2026-09-15 定）
 

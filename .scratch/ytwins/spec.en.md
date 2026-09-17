@@ -343,6 +343,14 @@ The 15 executable reply rules in `docs/ytwins/parent-voice-principles.md` are ha
 - **TypeScript + Node as a single project** (project files at the repository root), with domain logic and the
   interface layer in two top-level directories under `src/`; the further structure inside `src/` is left to
   implementation.
+  > **Corrected 2026-09-17 (when 12 landed)**: there are now **three** top-level directories under `src/` — the new
+  > one is `src/ai/`, holding the **implementation side of the port** (cloud/local LLM, local/cloud embedding,
+  > configuration and `.env` reading). The reason: the port's implementation is neither **domain logic** nor the
+  > **interface layer**, which is what the sentence above separates; and it must not be replaced along with the
+  > interface layer — when the web demo is replaced by a mobile client, `src/web/` goes away entirely and `src/ai/`
+  > has to stay. The dependency direction is therefore fixed at `src/web/ → src/ai/ → src/domain/` and
+  > `src/web/ → src/domain/`, with the domain side depending on no implementation at all (12's diff touches not one
+  > line of `src/domain/**`).
 - **A local Node server** (listening on the loopback address only) plus a **Vite-built web page**. The API key lives
   only in a server-side environment file (not in git); the browser never sees it.
 - **A SQLite file** as storage, with `ON DELETE CASCADE` foreign keys carrying cascade deletion.
@@ -369,6 +377,16 @@ The 15 executable reply rules in `docs/ytwins/parent-voice-principles.md` are ha
 - **Modules under test**: the domain core (end-to-end through its interface, with all AI supplied deterministically
   by the fake provider); the real implementation of the AI provider port gets only a small **manual smoke test**
   (it connects and returns the expected shape), never a test of its semantic quality.
+  > **Corrected 2026-09-17 (when 12 landed)**: that sentence separates **semantic quality** from **structure**, and
+  > that is the line the implementation drew — `src/ai/provider.test.ts` (`npm run test:ai`) asserts the latter
+  > automatically: that configuration selects each of the four combinations, that every field a model claims is
+  > checked by name, that a parse failure produces a named error, that the key only ever reaches the
+  > `Authorization` header (not the body, the URL or an error message), that local vectors come back one per text
+  > with a consistent width, and that one broken half leaves the other working. The former — whether a sentence
+  > reads well, whether two terms are judged alike — is asserted **nowhere**; it is printed for a human by
+  > `tools/smoke-provider.mjs`. Those checks are **injected** (`fetch` and the model loader are constructor
+  > parameters), so they reach no network and download nothing, and stay as deterministic as the domain tests.
+  > "Not tested" was always about the **model's judgement**, not about **the code's wiring**.
 - **Not tested**: the web DOM (the three acts are walked through by hand), SQLite internals, the output quality of
   real LLMs/embeddings, and cost.
 - **Shape of the fake provider**: a scripted implementation returning preset JSON per call, plus scripts that

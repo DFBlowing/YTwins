@@ -6,10 +6,11 @@
  * the built web page and the small API the page talks to.
  *
  * **The API key boundary lives here.** Any credential for a cloud provider is
- * read from the server's environment and used only on this side; nothing that
- * reaches the browser ever carries one. The provider wired up at this stage is
- * the local demo stand-in, which holds no credential at all — so the boundary
- * is intact for the strongest possible reason, not merely by convention.
+ * read from the server's environment — and from a `.env` file beside the
+ * repository, which git ignores — and is used only on this side: it goes into
+ * the provider wired up below, and nothing that reaches the browser ever
+ * carries one. The page has no route that could return it, because the domain
+ * never sees it and the provider is not part of anything the API serialises.
  *
  * Run it with: `node src/web/server.ts`
  *
@@ -22,10 +23,12 @@ import { statSync } from 'node:fs';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { ProviderConfigError, resolveProviderConfig, type ProviderConfig } from '../ai/config.ts';
+import { loadEnvFile } from '../ai/env-file.ts';
 import { createDomain } from '../domain/core.ts';
 import { isDeletionMode, type Domain } from '../domain/interface.ts';
 import { openSqliteStore } from '../domain/sqlite-store.ts';
-import { createDemoProvider } from './demo-provider.ts';
+import { createConfiguredProvider } from './provider.ts';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
 const REPO_ROOT = resolve(HERE, '..', '..');
@@ -33,6 +36,8 @@ const REPO_ROOT = resolve(HERE, '..', '..');
 const WEB_DIST = join(REPO_ROOT, 'dist', 'web');
 /** Where the SQLite file lives. Ignored by git — it is this machine's data. */
 const DEFAULT_DB = join(REPO_ROOT, 'data', 'ytwins.sqlite');
+/** Where the API key lives, when one is needed. Ignored by git. */
+const ENV_FILE = join(REPO_ROOT, '.env');
 
 /** Loopback only. `0.0.0.0` would expose the user's drops to the network. */
 const HOST = '127.0.0.1';
@@ -454,12 +459,35 @@ export function createHandler(domain: Domain) {
 }
 
 async function main(): Promise<void> {
-  // The provider is the demo's stand-in: tickets 01–11 all run on a fake, and
-  // the real one arrives in ticket 12 together with the key a human must supply.
-  // It has to be wired up even so — without it, asking a question could only
-  // ever come back "found nothing", and act two would have nothing to show.
+  // The one human step this product has: a key in a file nobody commits. The
+  // environment wins over the file, so `YTwins_LLM=local node src/web/server.ts`
+  // does what it looks like it does.
+  await loadEnvFile(ENV_FILE, process.env);
+
+  let config: ProviderConfig;
+  try {
+    config = resolveProviderConfig(process.env, { repoRoot: REPO_ROOT });
+  } catch (error) {
+    // A configuration nobody can act on is worse than no configuration: a typo
+    // that quietly picked the cloud over the local model would send the user's
+    // fragments off the machine while they believed otherwise. So it is stopped
+    // here, with the message naming the variable, rather than started wrong.
+    if (error instanceof ProviderConfigError) {
+      console.error(error.message);
+      process.exit(1);
+    }
+    throw error;
+  }
+
+  const { provider, notes } = createConfiguredProvider(config);
   const store = openSqliteStore(process.env['YTwins_DB'] ?? DEFAULT_DB);
-  const domain = createDomain({ store, provider: createDemoProvider() });
+  const domain = createDomain({ store, provider });
+
+  // Which pair this machine is actually running, in one line each, and never a
+  // key: the notes say whether one is configured, not what it is. This is the
+  // only place a person finds out, because the combination is a property of the
+  // environment and not of the page.
+  for (const note of notes) console.log(note);
 
   const server = createServer((request, response) => {
     // One handler rejection must never be an unhandled rejection: that would

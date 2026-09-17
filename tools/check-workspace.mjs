@@ -18,11 +18,15 @@ import { fileURLToPath } from 'node:url';
 /** Files allowed directly at the repo root. Everything else lives in a layer.
  *  The Node project files sit here because the web demo is built from the repo
  *  root; `CONTEXT-MAP.md` is allowed so that splitting the glossary into several
- *  contexts later does not trip the checker. */
+ *  contexts later does not trip the checker. `.env` and its template are here
+ *  because the server reads its key from `<root>/.env` (see
+ *  `src/ai/env-file.ts`): that path is a toolchain input, and this checker walks
+ *  the filesystem rather than git, so the ignored `.env` is visible to it even
+ *  though it is not in the repository. */
 const ROOT_ALLOWED_FILES = new Set([
   'AGENTS.md', 'CLAUDE.md', 'CONTEXT.md', 'CONTEXT-MAP.md', '.gitignore', 'skills-lock.json',
   'package.json', 'package-lock.json', 'pnpm-lock.yaml', 'tsconfig.json',
-  'vite.config.ts',
+  'vite.config.ts', '.env', '.env.example',
 ]);
 
 /** Workspace-level docs allowed in the docs/ root. Effort products never are. */

@@ -31,6 +31,14 @@
 （或 `pnpm-lock.yaml`）、`tsconfig.json`、`vite.config.ts`。它们不是一个「层」，只是工程的入口配置，
 所以不适用上面那张表的判据。
 
+`.env.example` 也在这里，理由同样是**位置本身就是输入**：服务端从 `<仓库根>/.env` 读云端 LLM 的
+key（`src/ai/env-file.ts`），所以模板必须摆在那个人被要求创建的文件旁边；真正的 `.env` 被 git 忽略，
+在受管理的文件里根本看不到它（ticket 12 加的，见该 ticket 的 `## Comments`）。
+
+> **检查器把 `.env` 也列进白名单**，因为 `check-workspace.mjs` 走的是文件系统而不是 git —— 被忽略的
+> `.env` 对它可见，而按本文件它确实该在根上。白名单放宽的是「这个位置允许」，不是「可以不管它」：
+> 除 `.env` / `.env.example` 之外的新根文件照旧要按下面那条先问一遍。
+
 `tools/check-workspace.mjs` 的 `ROOT_ALLOWED_FILES` 是**唯一**的根文件白名单。**往根加文件之前先问**：
 它能不能住进 `src/`、`tools/`、`docs/` 或 `archive/`？只有工具链强制要求它留在根时才加白名单，
 并在 `ROOT_ALLOWED_FILES` 上方的注释里说明是哪一条工具链要求的。

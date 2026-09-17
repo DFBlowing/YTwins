@@ -8,6 +8,7 @@
 | 工具 | 做什么 | 入口 |
 |---|---|---|
 | [`check-workspace.mjs`](check-workspace.mjs) | 检查目录布局有没有违例（根目录杂物、`.scratch/` 里的非 tracker 目录、effort 目录里的杂物、`archive/` 里的大文件）。按需运行，不拦截任何操作 | `node tools/check-workspace.mjs` |
+| [`smoke-provider.mjs`](smoke-provider.mjs) | **真实 provider 的手工冒烟**（ticket 12）：用 `.env` 里的真实配置打通八个操作，检查返回结构并打印内容。规格明确只手工冒烟、不自动断言语义质量，所以它不进任何测试套件 | `node tools/smoke-provider.mjs [all\|llm\|embedding]` |
 
 **一次性的端到端验收脚本**（`e2e-ticket-<NN>.mjs`，一个 ticket 一个）：它们按
 [`docs/agents/workspace-layout.md`](../docs/agents/workspace-layout.md) §`tools/` 里那条**已命名的例外**放在这里 ——
@@ -46,6 +47,12 @@ node tools/check-workspace.test.mjs
 
 # 跑领域测试（单进程、自带断言、退出码表达结果）
 node src/domain/domain.test.ts
+
+# 跑 AI provider 的测试（同样是单文件入口；全程不联网，fetch 与模型都是注入的）
+node src/ai/provider.test.ts
+
+# 真实 provider 的手工冒烟（要 key、要联网；第一次会下载本地 embedding 模型）
+node tools/smoke-provider.mjs
 
 # 类型检查（只覆盖 src/）
 npm run typecheck
