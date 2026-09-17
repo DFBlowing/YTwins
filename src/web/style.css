@@ -9,6 +9,9 @@
   --paper: #f7f5f1;
   --line: #e0dad1;
   --accent: #4a6b5d;
+  /* The one warning colour on the page. Used only where something is about to be
+     destroyed, so it stays a signal rather than becoming decoration. */
+  --warn: #9c4a34;
 }
 
 * {
@@ -171,6 +174,120 @@ body {
   margin: 0.5rem 0 0;
   font-size: 0.9rem;
   color: var(--accent);
+}
+
+/* 删除的入口（09）。刻意做成一个安静的按钮而不是红色的：它自己什么都不删，
+   只是问一句「删了会连带什么」。真正的警示色留给确认框里的那一个按钮 ——
+   到处都是红色，红色就不再是信号了。 */
+.drop-remove {
+  margin-top: 0.55rem;
+  padding: 0.15rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 0.4rem;
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.drop-remove:hover {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+/* 删除的确认框（09）。先告知，再执行 —— 一段随手丢进来的话可能正是好几条
+   小结论的地基，用户有权在动手之前看见这件事，而不是事后才知道。 */
+.removal {
+  margin: 1rem 0 0;
+  padding: 1rem 1.1rem;
+  border: 1px solid var(--warn);
+  border-radius: 0.6rem;
+  background: #fff;
+}
+
+.removal-title {
+  margin: 0 0 0.6rem;
+  font-size: 0.95rem;
+}
+
+.removal-body {
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  border-left: 2px solid var(--line);
+  color: var(--ink-soft);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.removal-count {
+  margin: 0.75rem 0 0.35rem;
+  font-size: 0.9rem;
+}
+
+.removal-list {
+  margin: 0;
+  padding: 0 0 0 1rem;
+  font-size: 0.9rem;
+}
+
+.removal-conclusion {
+  margin: 0.15rem 0;
+}
+
+.removal-terms {
+  margin: 0.5rem 0 0;
+  font-size: 0.82rem;
+  color: var(--ink-soft);
+}
+
+.removal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.9rem;
+}
+
+.removal-go,
+.removal-go-quiet,
+.removal-cancel {
+  padding: 0.35rem 0.85rem;
+  border-radius: 0.4rem;
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+/* The one destructive control: it takes the judgements too, so it carries the
+   warning colour and nothing else on this page does. */
+.removal-go {
+  border: 1px solid var(--warn);
+  background: var(--warn);
+  color: #fff;
+}
+
+.removal-go-quiet {
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+}
+
+/* 第三个答案是「保留」—— 它和另外两个一样醒目，因为看完预览决定不删，
+   就是一个决定，而不是「取消」。 */
+.removal-cancel {
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink-soft);
+}
+
+.removal-note {
+  margin: 0.6rem 0 0;
+  font-size: 0.85rem;
+  color: var(--accent);
+}
+
+.removal-note:empty {
+  display: none;
 }
 
 /* What this drop caught. Indented so the items read as belonging to the drop

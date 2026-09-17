@@ -23,7 +23,7 @@ import { extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { createDomain } from '../domain/core.ts';
-import type { Domain } from '../domain/interface.ts';
+import { isDeletionMode, type Domain } from '../domain/interface.ts';
 import { openSqliteStore } from '../domain/sqlite-store.ts';
 import { createDemoProvider } from './demo-provider.ts';
 
@@ -210,6 +210,72 @@ export function createHandler(domain: Domain) {
         sendJson(response, 200, { drop });
       } catch {
         sendJson(response, 500, { error: '读取失败' });
+      }
+      return;
+    }
+
+    // What deleting one fragment **would** take, counted before anything is
+    // removed (09). The first of deletion's two steps, and the reason it has two:
+    // a fragment typed in passing can turn out to be the ground a judgement
+    // stands on, and the user is owed that fact before they act on it.
+    //
+    // A GET, because it changes nothing — asking twice gives the same answer
+    // twice, and a page that shows a preview and then does nothing has left the
+    // material exactly as it was. The count the spec asks for is the length of
+    // `conclusions`; the sentences travel too, so the user can recognize what
+    // they would be giving up rather than trusting a number.
+    if (request.method === 'GET' && url.startsWith('/api/deletions/')) {
+      try {
+        const dropId = decodeURIComponent(url.slice('/api/deletions/'.length));
+        const preview = await domain.previewDeletion(dropId);
+        // Not found is a 404 rather than a 200 with null: unlike "nothing covers
+        // this question", there is no honest page state for "the fragment you are
+        // about to delete does not exist" — the client asked about a specific row.
+        if (preview === null) {
+          sendJson(response, 404, { error: '没有这次投递' });
+          return;
+        }
+        sendJson(response, 200, { preview });
+      } catch {
+        sendJson(response, 500, { error: '读取失败' });
+      }
+      return;
+    }
+
+    // Carry out a deletion (09). The choice is **required** and named: there is
+    // deliberately no request shape that deletes by default, because this is the
+    // one operation in the product that cannot be undone. `keep` is one of the
+    // three accepted answers and removes nothing — the decision the user arrived
+    // at by reading the preview counts as a decision.
+    if (request.method === 'POST' && url === '/api/delete') {
+      try {
+        const parsed = JSON.parse(await readBody(request)) as { dropId?: unknown; mode?: unknown };
+        const dropId = typeof parsed.dropId === 'string' ? parsed.dropId : '';
+        const mode = parsed.mode;
+        if (dropId.length === 0) {
+          sendJson(response, 400, { error: '没说是哪一次投递' });
+          return;
+        }
+        // An unrecognised mode is refused rather than passed through or defaulted:
+        // a page that sent nonsense must hear about it instead of watching the
+        // user's material disappear under a choice nobody made.
+        if (!isDeletionMode(mode)) {
+          sendJson(response, 400, { error: '不认识的删除方式' });
+          return;
+        }
+        const result = await domain.deleteDrop(dropId, mode);
+        if (result === null) {
+          // Nothing happened: either there is no such fragment, or the user chose
+          // to keep it. Both are reported as "nothing was deleted" rather than as
+          // an error, because neither is a failure.
+          sendJson(response, 200, { deleted: null });
+          return;
+        }
+        sendJson(response, 200, { deleted: result });
+      } catch (error) {
+        sendJson(response, 500, {
+          error: error instanceof Error ? error.message : '删除失败',
+        });
       }
       return;
     }

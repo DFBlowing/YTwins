@@ -355,6 +355,48 @@ export interface RecordedReading {
 }
 
 /**
+ * A set of terms to remove, and the term that keeps their matter alive.
+ *
+ * Both halves are needed together and are decided by the domain, not here: which
+ * words a deletion takes is "the words that drop alone said", and which one the
+ * matter was opened around is a fact about the matter. Splitting them into two
+ * calls would leave a window in which the matter has already lost its anchor and
+ * the store is still deciding what to do about it.
+ */
+export interface TermRemoval {
+  /** The terms to delete outright. Their mentions and links cascade. */
+  readonly termIds: readonly string[];
+  /**
+   * The term that opened the matter these words support, or null when none does.
+   *
+   * Named so the store can hand the matter over to a word that still exists
+   * rather than let it cascade away. Deleting the evidence for a judgement is not
+   * the same act as deleting the judgement: only `cascade` means the second, so
+   * the first must not silently imply it.
+   *
+   * It may be one of `termIds` — SQLite reads every row before enforcing
+   * anything, so a statement that re-points a matter at a term it is deleting in
+   * the same breath fails rather than quietly taking the matter with it.
+   */
+  readonly anchorTermId: string | null;
+}
+
+/**
+ * Terms to drop from the support of conclusions that are being kept.
+ *
+ * A named pair rather than two positional lists, for the same reason
+ * `TermRemoval` is one: the two halves are meaningless apart — the conclusions to
+ * prune and the words to prune out of them — and they travel together through the
+ * domain and into storage.
+ */
+export interface SupportPrune {
+  /** The conclusions whose support is to be pruned. */
+  readonly conclusionIds: readonly string[];
+  /** The terms to drop from it. */
+  readonly termIds: readonly string[];
+}
+
+/**
  * What the domain core needs from persistence.
  *
  * Deliberately narrow: it records drops and what was read out of them — items,
@@ -594,6 +636,140 @@ export interface DropStore {
    * rewrite alongside it is being updated by the drops themselves.
    */
   resetPile(): Promise<void>;
+
+  /**
+   * Remove terms outright, handing their support over to a term that survives.
+   *
+   * The destructive half of ticket 09, and deliberately a term-shaped operation
+   * rather than part of `deleteDrop`: deleting a **drop** is the domain's reading
+   * of the user's choice, while which words can no longer be said is a fact about
+   * the words, and the domain is what knows both.
+   *
+   * What it does:
+   *
+   *  - re-points every matter that was opened around one of these terms, and
+   *    every matter that counts one among its support, at `anchorTermId`
+   *    **before** the delete — so deleting a supporting word never turns into
+   *    deleting the judgement resting on it;
+   *  - deletes the terms themselves, which cascades their mentions and every link
+   *    either end of them: a link is a relation between two wordings, and half a
+   *    relation is not a weaker relation, it is nothing;
+   *  - removes them from every conclusion's support. What a judgement cites is
+   *    the evidence behind it, and evidence that cannot be read back is not
+   *    evidence — the store neither keeps the stale id nor invents a
+   *    replacement.
+   *
+   * It does **not** remove any conclusion. Support that shrank is written down as
+   * support that shrank; a judgement is removed only by `deleteDrop` under
+   * `cascade`, which is the user saying so.
+   *
+   * @param removal - the terms to delete, and where surviving matters should hang.
+   */
+  deleteTerms(removal: TermRemoval): Promise<void>;
+
+  /**
+   * Remove one drop, leaving nothing behind it.
+   *
+   * Called under either choice, and it is the same operation either way: what
+   * differs between them happens *before* this runs — the conclusions the user
+   * chose to keep are detached from the matter first, so that the cascade
+   * reaches nothing they meant to hold on to. That ordering is the whole reason
+   * this is one narrow call rather than a mode: the store has no opinion about
+   * what the user chose, it only removes what it is told to remove, and every
+   * row that goes with the drop goes because it was written to depend on it
+   * (mentions, items, the drop's place in its matter).
+   *
+   * @param dropId - the drop to delete.
+   * @returns true when a drop was there to delete, false when there was none.
+   */
+  deleteDrop(dropId: string): Promise<boolean>;
+
+  /**
+   * Re-open a matter around a term that survives, and hand back its member drops.
+   *
+   * The other half of keeping a judgement whose evidence is going away: a matter
+   * is anchored on the feeling it was opened around, so once that word is gone the
+   * matter has nowhere to stand and would cascade away with it — taking
+   * conclusions the user explicitly chose to keep.
+   *
+   * Only the **anchor** moves. No membership row is written: a matter is
+   * re-opened around a *word*, and a word is not a fragment — recording one as
+   * having arrived would be inventing a fact about the user's material. The count
+   * the matter keeps is a count of fragments, and it stays that.
+   *
+   * @param matterId - the matter to re-open.
+   * @param anchorTermId - the term that will open it from now on.
+   * @returns the drops that had been feeding it, each with the feeling it brought.
+   */
+  reopenMatter(
+    matterId: string,
+    anchorTermId: string,
+  ): Promise<readonly MatterDrop[]>;
+
+  /**
+   * Forget that a drop fed a matter.
+   *
+   * `detachDropFromMatter` for a drop that may already be on its way out — and it
+   * takes the matter's id rather than looking it up from the drop's, because
+   * under `original-only` this runs alongside the deletion and a lookup could
+   * find nothing left to look at.
+   *
+   * The drop's id and not the moment it joined: two fragments typed in one sitting
+   * land in the same millisecond, and a moment is not an identity — forgetting the
+   * wrong mention would silently re-count a matter, which is exactly the kind of
+   * quiet drift the raised count is supposed to be immune to.
+   *
+   * @param matterId - the matter to forget a mention in.
+   * @param dropId - the drop that is no longer part of it.
+   * @returns whether anything was removed.
+   */
+  forgetMatterDrop(matterId: string, dropId: string): Promise<boolean>;
+
+  /**
+   * Take one conclusion out of the matter it came from, and put it in another.
+   *
+   * How a judgement is **kept** while the material under it is deleted: a
+   * conclusion cascades with its matter, so one the user chose to keep has to be
+   * standing somewhere that survives before the deletion runs. Nothing else about
+   * it is touched — not the sentence, not the chain it sits in, not the numbers
+   * its wording was read off.
+   *
+   * @param conclusionId - the conclusion to move.
+   * @param matterId - the matter it now stands in.
+   */
+  detachConclusion(conclusionId: string, matterId: string): Promise<void>;
+
+  /**
+   * Remove conclusions outright.
+   *
+   * The destructive half of `cascade`, and explicit rather than left to the
+   * foreign key: a conclusion hangs off its **matter**, and deleting a drop only
+   * reaches the matter when that drop was its last member — so a matter the user
+   * kept returning to would survive, and "delete what came from it" would quietly
+   * become "delete nothing".
+   *
+   * What goes with each one is what exists only to explain it: the surfacings that
+   * recorded it being shown, and its place in the chain — the conclusion that
+   * carried on from it references it with `ON DELETE SET NULL`, so the chain is
+   * repaired rather than left pointing at nothing.
+   *
+   * @param conclusionId - the conclusion to remove.
+   * @returns true when there was one to remove.
+   */
+  deleteConclusion(conclusionId: string): Promise<boolean>;
+
+  /**
+   * Drop terms from conclusions' support, leaving the sentences untouched.
+   *
+   * The one edit `original-only` makes to a judgement the user chose to keep, and
+   * it is confined to the **support** on purpose: what a conclusion says is what
+   * the user decided to keep, word for word, while what it cites has to be
+   * evidence they can still read back. Nothing is put in a removed term's place —
+   * the domain does not know what the user meant by it.
+   *
+   * @param prune - the conclusions whose support is to be pruned, and the words.
+   */
+  pruneConclusionSupport(prune: SupportPrune): Promise<void>;
 
   /** Release the underlying resource. */
   close(): Promise<void>;

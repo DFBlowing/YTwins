@@ -520,6 +520,99 @@ export interface SurfacingOptions {
 }
 
 /**
+ * What the user may do about a conclusion a deletion would take with it.
+ *
+ * Two answers and no third, because these are the two things a person actually
+ * means when they delete a fragment they typed: *forget this* (and what I worked
+ * out from it was wrong or unwanted too), or *forget I said it* (while what it
+ * taught the product stands). There is deliberately no "keep the words, drop the
+ * judgement": the words are the only evidence the judgement can be checked
+ * against, so keeping it without them would leave the user a sentence they can no
+ * longer account for — which is exactly what this product refuses to show.
+ *
+ * `keep` is a value rather than the absence of one so that a caller has to have
+ * chosen, and so that "do nothing" is a thing a caller says rather than a thing
+ * that happens by default. Deletion is the one operation here that cannot be
+ * undone; it must never be the fall-through.
+ */
+export type DeletionMode = 'cascade' | 'original-only' | 'keep';
+
+/** Every mode, so a caller (and the API) can refuse one it cannot name. */
+export const DELETION_MODES: readonly DeletionMode[] = ['cascade', 'original-only', 'keep'];
+
+/**
+ * Whether a value that arrived from outside is one of the modes.
+ *
+ * A guard rather than a `some` at the call site, so that the narrowing and the
+ * list cannot come apart: a caller that checked membership by hand would still be
+ * holding a `string`, and the only way to hand it on would be a cast — which is
+ * exactly how a mode the domain never wrote reaches `deleteDrop`.
+ *
+ * @param value - anything that claims to be a deletion mode.
+ * @returns whether it is one.
+ */
+export function isDeletionMode(value: unknown): value is DeletionMode {
+  return DELETION_MODES.some((known) => known === value);
+}
+
+/**
+ * What deleting one **drop** would affect, counted before anything is removed.
+ *
+ * This exists because the user is owed an announcement, not a report: the whole
+ * reason deletion is two steps in this product is that a fragment people typed
+ * casually can turn out to be load-bearing, and finding that out *afterwards* is
+ * how a product loses someone's trust in one keystroke.
+ */
+export interface DeletionPreview {
+  /** The drop being asked about. */
+  readonly dropId: string;
+  /** The user's original text, so the announcement can name what is at stake. */
+  readonly body: string;
+  /**
+   * The conclusions that came out of this drop, oldest first.
+   *
+   * The **conclusions themselves** rather than a count, because a number alone
+   * is not something anyone can decide on: "2 conclusions came from it" asks the
+   * user to trust a tally, while showing the two sentences asks them to
+   * recognize what they would be giving up. The count the spec asks for is this
+   * list's length, and the page says it in those words.
+   */
+  readonly conclusions: readonly ConclusionRef[];
+  /**
+   * The words this drop alone said, and which would therefore go with it.
+   *
+   * Only the ones no other drop also said, because a wording the user repeated
+   * elsewhere stays — what is being deleted is one fragment, not a word they use.
+   */
+  readonly terms: readonly string[];
+}
+
+/**
+ * The outcome of a deletion that happened.
+ *
+ * Deliberately not a confirmation of the request that was made: it says which
+ * conclusions went, so a caller can report what actually happened rather than
+ * what was asked for — and under `original-only` that list is empty, which is the
+ * whole meaning of that choice. A caller that only wants "did anything happen"
+ * reads `null` from `deleteDrop`; one that wants to tell the user what they lost
+ * reads this.
+ */
+export interface DeletionResult {
+  /** The drop that is now gone. */
+  readonly dropId: string;
+  /**
+   * The conclusions that went with it, and **only ever the ones that went**.
+   *
+   * Empty under `original-only`: the judgements the user chose to keep are still
+   * in the portrait, and reporting them here would read as a deletion that
+   * happened to them.
+   */
+  readonly conclusions: readonly ConclusionRef[];
+  /** The mode that was carried out. */
+  readonly mode: DeletionMode;
+}
+
+/**
  * What is still to do, arranged on the timeline.
  *
  * A named shape rather than two return values or one list with a flag, because
@@ -565,6 +658,14 @@ export interface Upcoming {
  * operations named in the spec's interface (deletion, and what the user may do
  * to a conclusion) arrive with their own tickets — this interface grows, it does
  * not get pre-declared with stubs that would fake behaviour.
+ *
+ * Ticket 09 opens the one operation that destroys rather than accumulates:
+ * **deletion**. It is two operations and not one because the announcement is not
+ * a courtesy here — a fragment dropped in passing can turn out to be the ground a
+ * judgement stands on, and the user is owed that fact *before* they act on it.
+ * `previewDeletion` answers what would go; `deleteDrop` carries out a choice the
+ * caller has to have made, and `keep` is a value rather than an omission so that
+ * "delete nothing" cannot happen by accident.
  */
 export interface Domain {
   /**
@@ -751,4 +852,64 @@ export interface Domain {
    * @returns the answer and its sources, or an explicit failure.
    */
   recall(question: string, options?: RecallOptions): Promise<RecallResult>;
+
+  /**
+   * What deleting one drop **would** affect, counted before anything is removed.
+   *
+   * The first half of a two-step deletion, and the step that exists so the second
+   * one can be a decision rather than an accident: a fragment typed in passing may
+   * be the ground several judgements stand on, and the user is told that **before**
+   * they act on it, in words they can recognize — the sentences themselves, not a
+   * reassuring tally.
+   *
+   * It changes nothing. Asking twice gives the same answer twice, and a caller
+   * that shows a preview and then does nothing has left the user's material
+   * exactly as it was.
+   *
+   * A drop that does not exist is reported as null rather than as an error, the
+   * same reading `getDrop` takes: "there is no such fragment" is an answer.
+   *
+   * @param dropId - identity of the drop being asked about.
+   * @returns what a deletion would take, or null when there is no such drop.
+   */
+  previewDeletion(dropId: string): Promise<DeletionPreview | null>;
+
+  /**
+   * Delete one drop, according to a choice the caller has already made.
+   *
+   * The mode is **required on purpose**. Deletion is the only operation here that
+   * cannot be undone, so there is deliberately no call shape that deletes by
+   * default or on a missing argument — a caller must say what it means. `keep` is
+   * one of the three answers, and it deletes nothing at all: the decision the user
+   * arrived at by reading the preview counts as a decision.
+   *
+   * What each choice does, in the product's terms (`CONTEXT.md`, 小结论 / 画像):
+   *
+   *  - **`cascade`** — the fragment goes and so does everything the product worked
+   *    out from it. It is the choice for "forget this, and what you made of it was
+   *    wrong too", and after it nothing of the fragment survives anywhere: not in
+   *    recall, not in the portrait, not in the chain, not as the words it left
+   *    behind. A judgement that only that fragment supported cannot stand once the
+   *    evidence is gone — leaving it would be a claim with nothing behind it.
+   *  - **`original-only`** — the fragment goes and the judgements it fed **stay**,
+   *    exactly as they were worded. It is the choice for "forget I said it, but
+   *    what you noticed still holds". This is where the two options in the ticket
+   *    part ways, and the rule is deliberately "keep, do not invalidate": the
+   *    portrait is a history of what the product made of the material as it stood,
+   *    and rewriting an old judgement into "this was withdrawn" would be the
+   *    product editing its own past to look better. What does **not** happen is
+   *    half-measures: a supporting word the deleted fragment alone had said goes,
+   *    and the stored judgement is left naming one word fewer rather than pointing
+   *    at a word that no longer exists.
+   *  - **`keep`** — nothing is deleted, and the answer is null.
+   *
+   * Nothing is ever left dangling in any of the three: no support naming a word
+   * that is gone, no link joining one, no chain pointing at a conclusion that no
+   * longer exists.
+   *
+   * @param dropId - identity of the drop to delete.
+   * @param mode - what the user chose to do about what came from it.
+   * @returns what was removed, or null when nothing was (an unknown drop, or `keep`).
+   */
+  deleteDrop(dropId: string, mode: DeletionMode): Promise<DeletionResult | null>;
 }

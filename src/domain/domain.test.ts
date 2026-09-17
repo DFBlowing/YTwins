@@ -3602,6 +3602,571 @@ await check('the reply lands in the database, so a refresh shows the same line',
   });
 });
 
+console.log('\ndomain core — deletion, preview first');
+
+/**
+ * One more fragment, about something else entirely.
+ *
+ * It is what separates "this drop's conclusions went" from "every conclusion
+ * went": deletion is the one operation in this product that cannot be undone,
+ * so an over-eager delete has to fail a check as loudly as a missed one.
+ */
+const PASSER_BY = '楼下的橘猫又在晒太阳';
+const PASSER_BY_READING: AnchoredReading = [PASSER_BY, ['橘猫'], null];
+
+/** A run of the demo's material: three fragments about the exam, and one that only passes by. */
+interface ExamRun {
+  readonly domain: Domain;
+  readonly store: ReturnType<typeof openSqliteStore>;
+  /** The id of each fragment that was dropped, in the order it was dropped. */
+  readonly ids: readonly string[];
+  /** The id of the fragment that is **not** part of the matter. */
+  readonly passerById: string;
+}
+
+/**
+ * Settle the exam matter, then let one unrelated fragment pass by.
+ *
+ * The three exam fragments are dropped first and the look is forced, because a
+ * fragment that has not been looked at is not in a matter yet — and the whole
+ * question this section asks is what happens to a matter a drop belongs to. The
+ * passing fragment joins nothing, so it accumulates into no matter and yields no
+ * conclusion, which is what makes it a control.
+ *
+ * @param file - the database to open.
+ * @param extra - any further scripts the provider needs for this run.
+ * @returns the domain, the store and the ids the checks need.
+ */
+async function examRun(file: string, extra: Omit<FakeProviderScript, 'extractByBody'> = {}): Promise<ExamRun> {
+  const store = openSqliteStore(file);
+  const provider = mattersOnly([...EXAM_READINGS, PASSER_BY_READING], extra);
+  const domain = createDomain({ store, provider });
+
+  const ids: string[] = [];
+  for (const [body] of EXAM_READINGS) ids.push((await domain.drop(body)).id);
+  // Waited for rather than forced: the third fragment has to have been read and
+  // attached before a look can see the matter it opened, and `requestSurfacing`
+  // forces the look *and* records a surfacing — which is a fact this section then
+  // has no way to tell apart from the ones it means to test.
+  await readConclusions(domain, 1);
+  const passerById = (await domain.drop(PASSER_BY)).id;
+  await settledUntil(async () => (await domain.getDrop(passerById))?.extracted === true);
+
+  return { domain, store, ids, passerById };
+}
+
+/** Script a sentence for a matter so a conclusion exists to be deleted. */
+const EXAM_SCRIPT: Omit<FakeProviderScript, 'extractByBody'> = {
+  composeConclusionByAnchor: { 好烦: { kind: 'sentence', text: EXAM_SENTENCE } },
+};
+
+/**
+ * The line the portrait ends up holding for the exam matter.
+ *
+ * The provider writes the sentence and code writes the frame in front of it
+ * (`frameFor`), so this is the weak band's opening plus what the fake was
+ * scripted to say — spelled out here rather than composed the way the code
+ * composes it, because an expectation rebuilt by the implementation would agree
+ * with it by construction.
+ */
+const EXAM_LINE = `我不太确定：${EXAM_SENTENCE}。`;
+
+await check('a drop that fed conclusions says how many came from it, before anything is removed', async () => {
+  await withDatabase(async (file) => {
+    const { domain, store, ids } = await examRun(file, EXAM_SCRIPT);
+    try {
+      const third = ids[2];
+      assert.ok(third !== undefined, 'the third fragment was dropped');
+      const preview = await domain.previewDeletion(third);
+      assert.ok(preview !== null, 'the drop is there to be previewed');
+
+      assert.equal(preview.dropId, third);
+      assert.equal(preview.body, EXAM_THIRD, 'the preview names what is about to go');
+      assert.equal(preview.conclusions.length, 1, 'one conclusion came out of that fragment');
+      assert.equal(
+        preview.conclusions[0]?.text,
+        EXAM_LINE,
+        'and it is the sentence the user would recognize',
+      );
+      assert.deepEqual(
+        preview.terms,
+        ['平时分 40%'],
+        'the words only it said are listed — 「好烦」 is not, because two other fragments say it too',
+      );
+
+      // A preview that changed anything would not be a preview.
+      assert.equal((await domain.listDrops()).length, 4, 'nothing was removed by asking');
+      assert.equal((await domain.listConclusions()).length, 1, 'and no conclusion went either');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a fragment that fed nothing comes back with an empty preview, not an error', async () => {
+  await withDatabase(async (file) => {
+    const { domain, store, passerById } = await examRun(file, EXAM_SCRIPT);
+    try {
+      const preview = await domain.previewDeletion(passerById);
+      assert.ok(preview !== null);
+      assert.deepEqual(preview.conclusions, [], 'nothing came from it, and that is the honest count');
+      assert.deepEqual(preview.terms, ['橘猫'], 'its own words are still listed — they would go with it');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('previewing a drop that does not exist is null, not an error', async () => {
+  await withDatabase(async (file) => {
+    const { domain, store } = await examRun(file, EXAM_SCRIPT);
+    try {
+      assert.equal(await domain.previewDeletion('no-such-drop'), null);
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('nothing is deleted unless a choice is made, and "keep" deletes nothing', async () => {
+  await withDatabase(async (file) => {
+    const { domain, store, ids } = await examRun(file, EXAM_SCRIPT);
+    try {
+      const third = ids[2];
+      assert.ok(third !== undefined);
+      // The preview is the only thing that may be called without a choice, and
+      // the choice itself is a required argument — so there is no call shape in
+      // which a deletion happens by default.
+      const kept = await domain.deleteDrop(third, 'keep');
+      assert.equal(kept, null, 'keeping is not deleting, and says so');
+
+      assert.equal((await domain.listDrops()).length, 4, 'the fragment is still there');
+      assert.equal((await domain.listConclusions()).length, 1, 'and so is what came from it');
+      assert.equal((await domain.recall('期末怎么算分')).kind, 'not-found', 'nothing was searched for — no provider');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('cascading takes the drop, its conclusions, its terms and its links, and leaves the rest', async () => {
+  await withDatabase(async (file) => {
+    const { domain, store, ids, passerById } = await examRun(file, EXAM_SCRIPT);
+    try {
+      const second = ids[1];
+      assert.ok(second !== undefined);
+      const before = await domain.listLinks();
+      assert.ok(before.length > 0, 'the material had grown links to lose');
+
+      const removed = await domain.deleteDrop(second, 'cascade');
+      assert.ok(removed !== null, 'the deletion reports what it took');
+      assert.deepEqual(removed.conclusions.map((entry) => entry.text), [EXAM_LINE]);
+
+      assert.equal(await domain.getDrop(second), null, 'the drop is gone');
+      assert.equal((await domain.listConclusions()).length, 0, 'and so is the conclusion it fed');
+      assert.equal((await domain.listDrops()).length, 3, 'the other fragments are untouched');
+      assert.equal(
+        (await domain.getDrop(passerById))?.body,
+        PASSER_BY,
+        'the fragment that accumulated into nothing is untouched too',
+      );
+
+      // Only the words this drop alone had said. 「好烦」 is still said by two
+      // other fragments, so it stays — deleting a fragment must not change what
+      // the *other* fragments said.
+      const terms = await domain.listDrops();
+      const said = terms.flatMap((drop) => drop.terms.map((term) => term.text));
+      assert.ok(!said.includes('改提纲'), 'a word only that drop said went with it');
+      assert.ok(said.includes('好烦'), 'a word other drops also said stays');
+      assert.ok(
+        !(await domain.listLinks()).some(
+          (link) => link.from.text === '改提纲' || link.to.text === '改提纲',
+        ),
+        'and no link is left pointing at a word that is gone',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('the portrait and the chain keep no trace of a cascaded drop', async () => {
+  await withDatabase(async (file) => {
+    const { domain, store, ids } = await examRun(file, EXAM_SCRIPT);
+    try {
+      const second = ids[1];
+      assert.ok(second !== undefined);
+
+      // Shown to the user before it is deleted, so that "nothing of it is left"
+      // is a claim about a judgement that really was in the portrait — not about
+      // one that never existed.
+      const surfaced = await domain.requestSurfacing();
+      assert.equal(surfaced.kind, 'surfaced', 'the conclusion is in the portrait, and sayable');
+      if (surfaced.kind !== 'surfaced') return;
+
+      const removed = await domain.deleteDrop(second, 'cascade');
+      assert.ok(removed !== null);
+      assert.deepEqual(
+        removed.conclusions.map((conclusion) => conclusion.id),
+        [surfaced.conclusion.id],
+        'the only conclusion in the portrait was the one that came from this fragment',
+      );
+
+      // The portrait is the conclusions themselves, so an empty portrait and an
+      // empty chain are the same fact — but they are asserted through the reads
+      // the page makes, because a chain that survived its conclusions would show
+      // the user a "carried on from" pointing at nothing.
+      assert.deepEqual(await domain.listConclusions(), []);
+      const payload = JSON.stringify(await domain.listConclusions());
+      assert.ok(!payload.includes(EXAM_SENTENCE), 'not even the wording is left behind');
+      assert.ok(!payload.includes('改提纲'), 'nor a supporting word');
+
+      // And the record of it having been shown goes with it: a judgement that is
+      // gone cannot have been shown, and leaving the row would keep a *topic*
+      // quiet that no longer exists.
+      assert.deepEqual(
+        (await store.listSurfacings()).filter((record) => record.conclusionId === surfaced.conclusion.id),
+        [],
+        'the surfacing record went with the conclusion it was measured on',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('after a cascade, recall no longer returns that drop, and still returns the others', async () => {
+  await withDatabase(async (file) => {
+    const { domain, store, ids } = await examRun(file, {
+      ...EXAM_SCRIPT,
+      parseQuestionByQuestion: { 期末怎么算分: { kind: 'match', matchText: ['期末'] } },
+      composeFallback: { kind: 'answer', answer: ANSWER },
+    });
+    try {
+      const first = ids[0];
+      assert.ok(first !== undefined);
+
+      const before = await domain.recall('期末怎么算分');
+      assert.equal(before.kind, 'answered');
+      if (before.kind !== 'answered') return;
+      assert.deepEqual(before.sources.map((source) => source.body), [EXAM_FIRST]);
+
+      await domain.deleteDrop(first, 'cascade');
+
+      // The text is gone, not merely hidden: what matched was the original, and
+      // the original no longer exists to be matched.
+      const after = await domain.recall('期末怎么算分');
+      assert.equal(after.kind, 'not-found', 'the records no longer cover a question only it answered');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('keeping the conclusions keeps them whole, and prunes only what pointed at the drop', async () => {
+  await withDatabase(async (file) => {
+    const { domain, store, ids } = await examRun(file, EXAM_SCRIPT);
+    try {
+      const second = ids[1];
+      const first = ids[0];
+      assert.ok(second !== undefined && first !== undefined);
+
+      const preview = await domain.previewDeletion(second);
+      assert.ok(preview !== null);
+      assert.equal(preview.conclusions.length, 1, 'the preview announces what is at stake');
+      assert.deepEqual(preview.terms, ['改提纲'], 'and the word only it said');
+
+      const removed = await domain.deleteDrop(second, 'original-only');
+      assert.ok(removed !== null);
+      assert.deepEqual(
+        removed.conclusions,
+        [],
+        'nothing came away but the original, so nothing is reported as deleted',
+      );
+      assert.equal(removed.mode, 'original-only');
+
+      const kept = await domain.listConclusions();
+      assert.equal(kept.length, 1, 'the conclusion the user chose to keep is still in the portrait');
+      assert.equal(kept[0]?.text, EXAM_LINE, 'word for word — it is not reworded or re-assembled');
+      assert.ok(
+        kept[0]?.support.every((term) => term.text !== '改提纲'),
+        'but it no longer claims a word nobody says any more',
+      );
+
+      assert.equal(await domain.getDrop(second), null, 'the fragment itself is gone');
+      assert.equal((await domain.getDrop(first))?.body, EXAM_FIRST, 'the other fragments are untouched');
+
+      // Nothing dangles: every prop the portrait still shows is a word that
+      // still exists, and every link still joins two words that exist.
+      const remaining = await domain.listDrops();
+      const alive = new Set(remaining.flatMap((drop) => drop.terms.map((term) => term.text)));
+      assert.ok(
+        kept.flatMap((conclusion) => conclusion.support).every((term) => alive.has(term.text)),
+        'no support names a missing word',
+      );
+      assert.ok(
+        (await domain.listLinks()).every((link) => alive.has(link.from.text) && alive.has(link.to.text)),
+        'no link points at a missing word',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a fragment that only passes by is deleted without disturbing anything', async () => {
+  await withDatabase(async (file) => {
+    const { domain, store, passerById } = await examRun(file, EXAM_SCRIPT);
+    try {
+      const removed = await domain.deleteDrop(passerById, 'cascade');
+      assert.ok(removed !== null);
+      assert.deepEqual(removed.conclusions, [], 'it had none to take');
+      assert.equal(await domain.getDrop(passerById), null, 'but it went');
+      assert.equal((await domain.listConclusions()).length, 1, 'and the matter it was never part of is intact');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('deleting a drop that is gone already is null, not an error', async () => {
+  await withDatabase(async (file) => {
+    const { domain, store, passerById } = await examRun(file, EXAM_SCRIPT);
+    try {
+      await domain.deleteDrop(passerById, 'cascade');
+      assert.equal(await domain.deleteDrop(passerById, 'cascade'), null, 'a second delete is an answer');
+      assert.equal(await domain.previewDeletion(passerById), null);
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a deletion survives a restart', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ytwins-domain-'));
+  const file = join(dir, 'ytwins.sqlite');
+  try {
+    const first = await examRun(file, EXAM_SCRIPT);
+    const second = first.ids[1];
+    assert.ok(second !== undefined);
+    await first.domain.deleteDrop(second, 'cascade');
+    await first.store.close();
+
+    // Reopening is what a page refresh does to the server's view of the file,
+    // and this is the one operation that must not come back.
+    const store = openSqliteStore(file);
+    try {
+      const domain = createDomain({ store });
+      assert.equal(await domain.getDrop(second), null, 'the deleted fragment stays deleted');
+      assert.equal((await domain.listDrops()).length, 3, 'and the rest is still there');
+      assert.deepEqual(await domain.listConclusions(), [], 'nothing of it came back');
+    } finally {
+      await store.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+await check('a database written before the schema change loses no words when a drop goes', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ytwins-domain-'));
+  const file = join(dir, 'ytwins.sqlite');
+  try {
+    // A file from tickets 01–08: `term_.origin_drop_id` still **cascades**, which
+    // is how the schema shipped until ticket 09 found out what that costs.
+    const old = new DatabaseSync(file);
+    old.exec('PRAGMA foreign_keys = ON');
+    old.exec(`
+      CREATE TABLE drop_ (id TEXT PRIMARY KEY, body TEXT NOT NULL, dropped_at TEXT NOT NULL,
+        input_type TEXT, reply TEXT NOT NULL, anchor_term_id TEXT REFERENCES term_(id) ON DELETE SET NULL);
+      CREATE TABLE term_ (id TEXT PRIMARY KEY, text TEXT NOT NULL UNIQUE,
+        origin_drop_id TEXT NOT NULL REFERENCES drop_(id) ON DELETE CASCADE,
+        first_seen_at TEXT NOT NULL, vector TEXT);
+      CREATE TABLE term_in_drop_ (drop_id TEXT NOT NULL REFERENCES drop_(id) ON DELETE CASCADE,
+        term_id TEXT NOT NULL REFERENCES term_(id) ON DELETE CASCADE, said_at TEXT NOT NULL,
+        PRIMARY KEY (drop_id, term_id));
+      CREATE TABLE item_ (id TEXT PRIMARY KEY, drop_id TEXT NOT NULL REFERENCES drop_(id) ON DELETE CASCADE,
+        text TEXT NOT NULL, due_at TEXT, state TEXT NOT NULL DEFAULT 'todo', caught_at TEXT NOT NULL);
+      CREATE TABLE link_ (id TEXT PRIMARY KEY, a_term_id TEXT NOT NULL REFERENCES term_(id) ON DELETE CASCADE,
+        b_term_id TEXT NOT NULL REFERENCES term_(id) ON DELETE CASCADE, kind TEXT NOT NULL,
+        strength REAL NOT NULL, reason TEXT NOT NULL, UNIQUE (a_term_id, b_term_id));
+    `);
+    old.close();
+
+    const store = openSqliteStore(file);
+    try {
+      const provider = mattersOnly([...EXAM_READINGS, PASSER_BY_READING], EXAM_SCRIPT);
+      const domain = createDomain({ store, provider });
+      const ids: string[] = [];
+      for (const [body] of EXAM_READINGS) ids.push((await domain.drop(body)).id);
+      await readConclusions(domain, 1);
+
+      const first = ids[0];
+      assert.ok(first !== undefined);
+      await domain.deleteDrop(first, 'cascade');
+
+      // The word the deleted fragment first said is still said by the two that
+      // remain, so it has to survive. Under the old schema the cascade on
+      // `origin_drop_id` took it, and those two fragments silently lost something
+      // they had said — which is the whole reason the reference was dropped.
+      const said = (await domain.listDrops()).flatMap((drop) => drop.terms.map((term) => term.text));
+      assert.ok(said.includes('好烦'), 'a word the remaining fragments still say did not disappear');
+      assert.ok(!said.includes('期末怎么算分'), 'and a word only the deleted one said did go');
+    } finally {
+      await store.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+await check('keeping works when the deleted fragment is the one the matter was opened around', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      // The shape every other check in this section misses: a matter anchored on
+      // a word that the **first** fragment alone said. Everywhere else the anchor
+      // is 「好烦」, which all three fragments say, so the anchor survives by
+      // accident and the re-anchoring path is never walked — which is exactly how
+      // a foreign-key violation lived here until the e2e found it.
+      const first = '今天面试没过，心里很慌';
+      const rest: [string, string[]][] = [
+        ['面试又挂了，心里很慌', ['面试又挂了', '心里很慌']],
+        ['面试还是没消息，心里很慌', ['面试没消息', '心里很慌']],
+      ];
+      const provider = mattersOnly(
+        [[first, ['面试没过', '心里很慌'], '心里很慌'], ...rest.map(([body, terms]) => [body, terms, '心里很慌'] as AnchoredReading)],
+        { composeConclusionByAnchor: { 心里很慌: { kind: 'sentence', text: '你最近好像在等一个结果' } } },
+      );
+      const domain = createDomain({ store, provider });
+
+      const droppedFirst = await domain.drop(first);
+      for (const [body] of rest) await domain.drop(body);
+      assert.equal((await readConclusions(domain, 1)).length, 1, 'the matter crossed');
+
+      const preview = await domain.previewDeletion(droppedFirst.id);
+      assert.ok(preview !== null);
+      assert.deepEqual(preview.terms, ['面试没过'], 'the word only the first fragment said');
+
+      // The anchor was opened around 「心里很慌」, which all three say, so here the
+      // matter keeps standing on it and nothing has to be re-anchored. What this
+      // pins is the **whole path** running: reading the facts, carrying the
+      // judgement over, deleting, and pruning — none of which may throw.
+      const removed = await domain.deleteDrop(droppedFirst.id, 'original-only');
+      assert.ok(removed !== null, 'the deletion completed rather than blowing up mid-way');
+      assert.equal(await domain.getDrop(droppedFirst.id), null, 'the fragment is gone');
+
+      const kept = await domain.listConclusions();
+      assert.equal(kept.length, 1, 'the judgement the user kept is still there');
+      assert.ok(
+        kept[0]?.support.every((term) => term.text !== '面试没过'),
+        'and it no longer cites the word that went',
+      );
+      assert.ok(
+        kept[0]?.support.some((term) => term.text === '心里很慌'),
+        'while the feeling all three fragments share is still cited',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('keeping works when the anchor itself is the word only that fragment said', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      // The branch the check above does not reach, and the one that was actually
+      // broken: the matter's **anchor** is a word only the deleted fragment said,
+      // so the matter has to be re-opened around a word that survives — or it
+      // cascades away and takes the judgement the user asked to keep with it.
+      //
+      // Built through the store rather than through drops, because a matter only
+      // ends up anchored on an orphaned word in a shape the domain's own
+      // attachment rules do not produce: the anchor is normally the feeling the
+      // fragments keep repeating. This is the state a real database can still be
+      // in after an earlier deletion, so it has to work.
+      const anchorDrop = await store.appendDrop('今天面试没过，心里很慌', '记下了。', '2026-09-01T00:00:00.000Z');
+      const otherDrop = await store.appendDrop('面试又挂了，好烦', '记下了。', '2026-09-02T00:00:00.000Z');
+      const anchorReading = await store.recordExtraction(
+        anchorDrop.id,
+        { inputType: 'emotion', items: [], terms: ['心里很慌'], anchor: '心里很慌' },
+        '2026-09-01T00:00:00.000Z',
+      );
+      const otherReading = await store.recordExtraction(
+        otherDrop.id,
+        { inputType: 'emotion', items: [], terms: ['面试又挂了'], anchor: null },
+        '2026-09-02T00:00:00.000Z',
+      );
+      const anchorTerm = anchorReading.terms[0];
+      const survivor = otherReading.terms[0];
+      assert.ok(anchorTerm !== undefined && survivor !== undefined);
+
+      const matter = await store.openMatter({
+        dropId: anchorDrop.id,
+        anchorTermId: anchorTerm.id,
+        at: '2026-09-01T00:00:00.000Z',
+        termIds: [anchorTerm.id],
+      });
+      await store.growMatter({
+        matterId: matter.id,
+        dropId: otherDrop.id,
+        anchorTermId: null,
+        at: '2026-09-02T00:00:00.000Z',
+        termIds: [survivor.id],
+      });
+      await store.appendConclusion({
+        matterId: matter.id,
+        claim: null,
+        text: '我不太确定：你最近好像在等一个结果。',
+        kind: 'catch',
+        tier: null,
+        relation: 'first',
+        supersedes: null,
+        createdAt: '2026-09-02T00:00:00.000Z',
+        mentions: 2,
+        spanDays: 1,
+        averageStrength: 1,
+        supportTermIds: [anchorTerm.id, survivor.id],
+      });
+
+      const domain = createDomain({ store });
+      const preview = await domain.previewDeletion(anchorDrop.id);
+      assert.ok(preview !== null);
+      assert.deepEqual(preview.conclusions.length, 1, 'the judgement came from this fragment');
+
+      // This is the call that used to throw `FOREIGN KEY constraint failed`: the
+      // matter was re-opened by inventing a `matter_drop_` row for a drop that
+      // does not exist. A deletion that throws here is the worst outcome in the
+      // product — the user asked for something reversible-looking and got neither
+      // the deletion nor their material left alone.
+      const removed = await domain.deleteDrop(anchorDrop.id, 'original-only');
+      assert.ok(removed !== null, 'the deletion completed');
+
+      const kept = await domain.listConclusions();
+      assert.equal(kept.length, 1, 'the judgement survived its anchor going');
+      assert.ok(
+        kept[0]?.support.every((term) => term.text !== '心里很慌'),
+        'and stopped citing the word that went',
+      );
+      assert.equal(
+        (await domain.listDrops()).length,
+        1,
+        'only the fragment that was deleted went',
+      );
+      // The matter is still feedable: it did not quietly lose its ground.
+      const matters = await store.listMatters();
+      assert.equal(matters.length, 1, 'the matter is still there');
+      assert.ok(
+        matters[0] !== undefined && !matters[0].supportTermIds.includes(anchorTerm.id),
+        'and it no longer counts a word nobody says',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
 console.log(`\n${checks - failures}/${checks} checks passed`);
 if (failures > 0) {
   console.error(`${failures} check(s) failed`);

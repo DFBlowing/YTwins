@@ -41,6 +41,27 @@
         <p class="reply" id="drop-reply" role="status" aria-live="polite"></p>
 
         <!--
+          删除（09）。两步，而且第一步不能省：一段随手丢进来的话，事后可能正是
+          好几条小结论的地基，用户有权在动手之前知道这件事。所以「删」这个按钮
+          不删任何东西，它先把「有 N 条小结论是从它来的」摆出来，由用户选。
+          三个答案里「保留」也是答案 —— 看完预览决定不删，就是决定。
+        -->
+        <section class="removal" id="removal" role="alertdialog" aria-labelledby="removal-title" hidden>
+          <h2 class="removal-title" id="removal-title">要删掉哪一次投递？</h2>
+          <blockquote class="removal-body" id="removal-body"></blockquote>
+          <p class="removal-count" id="removal-count"></p>
+          <ul class="removal-list" id="removal-list"></ul>
+          <p class="removal-terms" id="removal-terms"></p>
+          <div class="removal-actions">
+            <button type="button" class="removal-go" id="removal-cascade">一起删掉</button>
+            <button type="button" class="removal-go removal-go-quiet" id="removal-original">只删原文</button>
+            <button type="button" class="removal-cancel" id="removal-cancel">保留</button>
+          </div>
+        </section>
+
+        <p class="removal-note" id="removal-note" role="status" aria-live="polite"></p>
+
+        <!--
           浮现（06）。只在这次投递带情绪、且确实有可说的一句时才出现 ——
           它不主动推送，所以「什么都没有」时这一行根本不显示。
         -->

@@ -6,7 +6,7 @@
   "description": "YTwins — drop fragments in, get conclusions back, silently.",
   "scripts": {
     "test": "node src/domain/domain.test.ts",
-    "test:e2e": "node tools/e2e-ticket-02.mjs",
+    "test:e2e": "node tools/e2e-ticket-09.mjs",
     "server": "node src/web/server.ts",
     "dev:web": "vite",
     "build:web": "vite build",

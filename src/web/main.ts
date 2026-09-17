@@ -65,6 +65,16 @@
  * no calendar here and no conflict detection, and there is deliberately nothing
  * scheduling-shaped about a drop either — the user still types no time, and the
  * item already carries whatever time was read out of what they said.
+ *
+ * What act one shows after ticket 09: the way to **delete** a fragment, and it is
+ * two steps rather than one. The button beside a drop removes nothing — it asks
+ * the server what a deletion would take, and what comes back is the sentences
+ * themselves, because a fragment typed in passing can turn out to be the ground
+ * several judgements stand on and "2 conclusions came from it" asks the user to
+ * trust a tally. The choice is then theirs: take them too, keep them and lose only
+ * the original, or keep everything. Nothing on this page deletes by default, and
+ * every read is re-run afterwards rather than edited in place, because a deletion
+ * can change the drops, the links, the portrait and the timeline at once.
  */
 
 /** One item parsed out of a drop, as the server reports it. */
@@ -215,6 +225,45 @@ type SurfacingResult =
       readonly reason: 'not-a-moment' | 'nothing-to-say' | 'cooldown' | 'held-back';
     };
 
+/**
+ * What the user may do about a conclusion a deletion would take with it.
+ *
+ * Spelled out here rather than imported from the domain: this file is browser
+ * code and takes nothing from `src/domain/`, the same way `RecallResult` and
+ * `SurfacingResult` above are mirrored rather than shared. Named once so the two
+ * places that carry it — the result and the choice handler — cannot drift.
+ */
+type DeletionMode = 'cascade' | 'original-only' | 'keep';
+
+/**
+ * What deleting one fragment would take, as the server reports it.
+ *
+ * Mirrors the domain's shape: the conclusions come as the sentences themselves
+ * rather than a count, because "2 conclusions came from it" asks the user to
+ * trust a tally while showing the two sentences asks them to recognize what they
+ * would be giving up. The count the page shows is this list's length.
+ */
+interface DeletionPreview {
+  readonly dropId: string;
+  readonly body: string;
+  readonly conclusions: readonly ConclusionRef[];
+  readonly terms: readonly string[];
+}
+
+/**
+ * What a deletion did, as the server reports it.
+ *
+ * Null when nothing was removed, which is an ordinary answer and not a failure:
+ * either the fragment was already gone, or the user read the preview and chose to
+ * keep it.
+ */
+interface DeletionResult {
+  readonly dropId: string;
+  /** Only ever the conclusions that actually went — empty under 'original-only'. */
+  readonly conclusions: readonly ConclusionRef[];
+  readonly mode: DeletionMode;
+}
+
 function mustFind<T extends Element>(selector: string): T {
   const found = document.querySelector<T>(selector);
   if (found === null) throw new Error(`页面缺失元素：${selector}`);
@@ -232,6 +281,16 @@ const linkList = mustFind<HTMLUListElement>('#link-list');
 const linkEmpty = mustFind<HTMLParagraphElement>('#link-empty');
 const conclusionList = mustFind<HTMLOListElement>('#conclusion-list');
 const conclusionEmpty = mustFind<HTMLParagraphElement>('#conclusion-empty');
+
+const removal = mustFind<HTMLElement>('#removal');
+const removalBody = mustFind<HTMLQuoteElement>('#removal-body');
+const removalCount = mustFind<HTMLParagraphElement>('#removal-count');
+const removalList = mustFind<HTMLUListElement>('#removal-list');
+const removalTerms = mustFind<HTMLParagraphElement>('#removal-terms');
+const removalCascade = mustFind<HTMLButtonElement>('#removal-cascade');
+const removalOriginal = mustFind<HTMLButtonElement>('#removal-original');
+const removalCancel = mustFind<HTMLButtonElement>('#removal-cancel');
+const removalNote = mustFind<HTMLParagraphElement>('#removal-note');
 
 const dueList = mustFind<HTMLUListElement>('#due-list');
 const dueEmpty = mustFind<HTMLParagraphElement>('#due-empty');
@@ -577,7 +636,17 @@ function renderDrop(drop: DropSummary): HTMLLIElement {
   reply.className = 'drop-reply';
   reply.textContent = drop.reply;
 
-  item.append(body, when, reply);
+  // 09: the way in to deletion. Deliberately not a delete button — it removes
+  // nothing and asks the server what a deletion **would** take, because a
+  // fragment typed in passing can turn out to be the ground a judgement stands
+  // on and the user is owed that before they act rather than after.
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'drop-remove';
+  remove.dataset['dropId'] = drop.id;
+  remove.textContent = '删掉这次投递';
+
+  item.append(body, when, reply, remove);
 
   if (drop.extracted) {
     if (drop.items.length > 0) {
@@ -624,6 +693,141 @@ async function loadDrops(): Promise<readonly DropSummary[]> {
   render(drops);
   return drops;
 }
+
+/**
+ * The deletion the user is being asked about, or null when nothing is pending.
+ *
+ * Held because the choice is made **after** the preview is on screen: the two
+ * buttons below answer a question that was asked a moment earlier, and a page
+ * that guessed which fragment they referred to would be deleting on a guess.
+ */
+let pendingRemoval: DeletionPreview | null = null;
+
+/** Put a deletion preview on screen, and hold what the buttons will act on. */
+function showRemoval(preview: DeletionPreview): void {
+  pendingRemoval = preview;
+  removalBody.textContent = preview.body;
+
+  const count = preview.conclusions.length;
+  // The sentence the spec asks for, and only when it is true: a fragment that fed
+  // nothing says so plainly rather than announcing "0 conclusions came from it",
+  // which reads like a count rather than like an answer.
+  removalCount.textContent =
+    count === 0 ? '没有小结论是从它来的。' : `有 ${count} 条小结论是从它来的：`;
+  removalList.replaceChildren(
+    ...preview.conclusions.map((conclusion) => {
+      const row = document.createElement('li');
+      row.className = 'removal-conclusion';
+      row.textContent = conclusion.text;
+      return row;
+    }),
+  );
+  // Named so the user can see what would go with it. A word they say elsewhere is
+  // not listed, because it would not go — the list is the answer to "what do I
+  // lose", not to "what was in it".
+  removalTerms.textContent =
+    preview.terms.length === 0
+      ? ''
+      : `同时会去掉只在这里说过的词条：${preview.terms.join('、')}`;
+
+  removal.hidden = false;
+  removalNote.textContent = '';
+  removalCascade.focus();
+}
+
+/** Close the confirmation, whether anything was deleted or not. */
+function hideRemoval(): void {
+  removal.hidden = true;
+  pendingRemoval = null;
+}
+
+/** What a finished deletion means, in words the page can show. */
+function deletionLine(result: DeletionResult | null): string {
+  if (result === null || result.mode === 'keep') return '保留了，什么都没删。';
+  const count = result.conclusions.length;
+  if (result.mode === 'cascade') {
+    return count === 0 ? '已经删掉了。' : `已经删掉了，连同 ${count} 条小结论。`;
+  }
+  return '原文已经删掉了，小结论按你选的留了下来。';
+}
+
+/**
+ * Ask what deleting one fragment would take, and put the question on screen.
+ *
+ * Nothing is deleted by this call, and that is the point of it being a separate
+ * step: a product that acted on the first click would be asking the user to
+ * approve a consequence they were never shown.
+ */
+async function askToRemove(dropId: string, button: HTMLButtonElement): Promise<void> {
+  button.disabled = true;
+  try {
+    const response = await fetch(`/api/deletions/${encodeURIComponent(dropId)}`);
+    if (!response.ok) {
+      removalNote.textContent = '没能读到这次投递，稍后再试试。';
+      return;
+    }
+    const payload = (await response.json()) as { preview: DeletionPreview };
+    showRemoval(payload.preview);
+  } catch {
+    removalNote.textContent = '连不上本地服务。';
+  } finally {
+    button.disabled = false;
+  }
+}
+
+/**
+ * Carry out the choice the user just made, and show the lists as they now stand.
+ *
+ * Every read on this page is re-run afterwards rather than edited in place: a
+ * deletion can change the drops, the links, the portrait and the timeline at
+ * once, and a page that removed a row by hand would be keeping its own opinion
+ * about what is left. Re-reading is also the honest way to show that something
+ * is gone.
+ */
+async function carryOutRemoval(mode: DeletionMode): Promise<void> {
+  const preview = pendingRemoval;
+  if (preview === null) return;
+
+  for (const button of [removalCascade, removalOriginal, removalCancel]) button.disabled = true;
+  try {
+    const response = await fetch('/api/delete', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ dropId: preview.dropId, mode }),
+    });
+    if (!response.ok) {
+      const problem = (await response.json()) as { error?: string };
+      removalNote.textContent = problem.error ?? '没删成，再试一次。';
+      return;
+    }
+    const payload = (await response.json()) as { deleted: DeletionResult | null };
+    hideRemoval();
+    removalNote.textContent = deletionLine(payload.deleted);
+
+    await loadDrops();
+    await loadLinks();
+    await loadConclusions();
+    await loadUpcoming();
+  } catch {
+    removalNote.textContent = '连不上本地服务。';
+  } finally {
+    for (const button of [removalCascade, removalOriginal, removalCancel]) button.disabled = false;
+  }
+}
+
+// Delegated, like the scheduling list and for the same reason: the rows are
+// replaced on every read, so a listener attached to a row would be thrown away
+// with it.
+list.addEventListener('click', (event) => {
+  const button = (event.target as Element | null)?.closest<HTMLButtonElement>('.drop-remove');
+  const dropId = button?.dataset['dropId'];
+  if (button === null || button === undefined || dropId === undefined) return;
+  void askToRemove(dropId, button);
+});
+
+removalCascade.addEventListener('click', () => void carryOutRemoval('cascade'));
+removalOriginal.addEventListener('click', () => void carryOutRemoval('original-only'));
+removalCancel.addEventListener('click', () => void carryOutRemoval('keep'));
 
 /**
  * Load the links between terms.

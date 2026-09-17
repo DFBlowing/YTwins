@@ -48,6 +48,20 @@
  * seven days, and every surfacing is written down where the cooldown can find it
  * after a restart.
  *
+ * Ticket 09 gives the whole of the above its one destructive operation, and
+ * splits it in two on purpose. **Deletion** is the only thing here that cannot be
+ * undone, and the reason it takes two calls is not politeness: a fragment dropped
+ * in passing can turn out to be the ground a judgement stands on, and the user is
+ * owed that fact before they act rather than after. So `previewDeletion` says what
+ * would go, and `deleteDrop` carries out a choice that has to be **stated** —
+ * `keep` is a value, not an omission, because there must be no call shape in which
+ * material disappears by default. What the two choices mean is the product's own
+ * position rather than a storage detail: `cascade` is "forget this and what you
+ * made of it", `original-only` is "forget I said it, and let what you noticed
+ * stand" — and the second keeps the judgements word for word, because rewriting
+ * an old one into "withdrawn" would be the product editing its own history to look
+ * better.
+ *
  * @module domain/core
  */
 
@@ -71,6 +85,9 @@ import type {
   ConclusionRef,
   ConclusionRelation,
   ConclusionTier,
+  DeletionMode,
+  DeletionPreview,
+  DeletionResult,
   Domain,
   DropResult,
   DropSummary,
@@ -110,6 +127,7 @@ import {
 import { upcomingFrom } from './scheduling.ts';
 import type {
   DropStore,
+  MatterDrop,
   NewLink,
   RecordedReading,
   StoredConclusion,
@@ -1273,6 +1291,197 @@ export function createDomain(options: DomainCoreOptions): Domain {
     }
   }
 
+  /**
+   * Everything a deletion needs to know about one drop, read once.
+   *
+   * Read as one thing because the three answers are about the same fragment and
+   * have to agree with each other: which judgements rested on it, which words it
+   * was the last to say, and what the user is therefore being asked to give up.
+   * Reading them separately would let the preview and the deletion see different
+   * material — a small window, but this is the one operation where a discrepancy
+   * between what was announced and what happened is unrecoverable.
+   *
+   * @param dropId - the drop being deleted or previewed.
+   * @param body - its text, already read by the caller.
+   * @returns the conclusions it fed, the terms only it said, and the announcement.
+   */
+  interface DeletionFacts {
+    /** The conclusions that came out of this drop, oldest first. */
+    readonly conclusions: readonly StoredConclusion[];
+    /** The words this drop was the last to say, in the order it said them. */
+    readonly terms: readonly StoredTerm[];
+    /** What the user is shown before anything happens. */
+    readonly preview: DeletionPreview;
+  }
+
+  async function readDeletion(dropId: string, body: string): Promise<DeletionFacts> {
+    const byDrop = await store.listTermsByDrop();
+    const matters = await store.listMatters();
+    const all = await store.listConclusions();
+
+    // A drop fed a conclusion when the matter that conclusion came out of counts
+    // **this drop** among the fragments that raised it. That is the only honest
+    // answer to "did this drop produce it", and it is deliberately the narrow one:
+    // a conclusion assembled from a matter whose other fragments are still there
+    // does not become "this drop's" merely by sharing a subject with it.
+    const mattersFed = new Set(
+      matters
+        .filter((matter) => matter.drops.some((mention) => mention.dropId === dropId))
+        .map((matter) => matter.id),
+    );
+    const conclusions = all.filter((conclusion) => mattersFed.has(conclusion.matterId));
+
+    // Who is still saying a word is the set of drops that mention it — counted
+    // across **every** drop rather than looked up from where the term came from.
+    // The two come apart the moment someone repeats a word: an origin is only the
+    // fragment that first said it, so trusting it would call 「好烦」 a word the
+    // first fragment alone said — and deleting a later fragment would then take a
+    // word two others still say.
+    const saidElsewhere = new Set<string>();
+    for (const [otherDropId, mentions] of byDrop) {
+      if (otherDropId === dropId) continue;
+      for (const term of mentions) saidElsewhere.add(term.id);
+    }
+    const terms = (byDrop.get(dropId) ?? []).filter((term) => !saidElsewhere.has(term.id));
+
+    return {
+      conclusions,
+      terms,
+      preview: {
+        dropId,
+        body,
+        // The sentences themselves rather than a tally: "2 conclusions came from
+        // it" asks the user to trust a number, while showing the two sentences
+        // asks them to recognize what they would be giving up. The count the spec
+        // asks for is this list's length, and the page says it in those words.
+        conclusions: conclusions.map((conclusion) => ({
+          id: conclusion.id,
+          text: conclusion.text,
+        })),
+        terms: terms.map((term) => term.text),
+      },
+    };
+  }
+
+  /**
+   * Remove conclusions outright.
+   *
+   * Explicitly, rather than leaving it to the cascade: a conclusion hangs off
+   * **its matter**, and a drop's deletion only reaches the matter when that drop
+   * was the matter's last member. A matter the user has kept raising would keep
+   * the judgement alive, so "delete what came from it" would quietly become
+   * "delete nothing" — the one outcome worse than either choice.
+   *
+   * @param conclusionIds - the conclusions to remove.
+   */
+  async function dropConclusions(conclusionIds: readonly string[]): Promise<void> {
+    for (const conclusionId of conclusionIds) await store.deleteConclusion(conclusionId);
+  }
+
+  /**
+   * Move what the user chose to keep somewhere the deletion cannot reach.
+   *
+   * `original-only` is the choice "forget I said it, but what you noticed still
+   * holds", and the storage puts those two in conflict: a conclusion cascades
+   * with its **matter**, a matter cascades with the **term** it was opened
+   * around, and a topic's fragments keep saying the same few words — so deleting
+   * the fragment that first said 「好烦」 would take the matter, and with it every
+   * judgement the user just asked to keep.
+   *
+   * The way out is not to weaken the cascade but to give the kept judgements a
+   * ground that survives **before** anything is deleted:
+   *
+   *  1. A term the drop alone said is going, so the matter is re-opened around a
+   *     word that stays — one the matter already counts as support. If there is
+   *     none, the matter has nothing left to stand on and no judgement can be
+   *     kept from it; the second step then moves nothing, which is the honest
+   *     outcome rather than a judgement with no evidence under it.
+   *  2. The kept conclusions are moved onto that surviving matter. What they
+   *     **cite** is left alone here: the support a judgement carries is the
+   *     evidence it was assembled from, and rewriting that at the moment of
+   *     deletion would make the product's own record of what it saw into a record
+   *     of what is left.
+   *  3. What is left of the matter becomes a summary of the fragments that remain,
+   *     so a matter cannot keep counting a fragment the user has taken back.
+   *
+   * @param facts - what the one read of this drop turned up.
+   * @returns the conclusions that now stand on the surviving matter.
+   */
+  async function carryOver(facts: DeletionFacts): Promise<readonly StoredConclusion[]> {
+    const matters = await store.listMatters();
+    const orphans = new Set(facts.terms.map((term) => term.id));
+
+    const kept: StoredConclusion[] = [];
+    for (const conclusion of facts.conclusions) {
+      const matter = matters.find((candidate) => candidate.id === conclusion.matterId);
+      if (matter === undefined) continue;
+
+      const survivor =
+        matter.supportTermIds.find((termId) => !orphans.has(termId)) ??
+        (orphans.has(matter.anchorTermId) ? undefined : matter.anchorTermId);
+      if (survivor === undefined) continue;
+
+      // The new anchor term is named here, and what `reopenMatter` hands back —
+      // the drops now feeding the matter — is not read: this function's job is to
+      // get the matter and its judgements onto ground that survives, and the
+      // caller re-reads whatever it needs afterwards. 
+      if (orphans.has(matter.anchorTermId)) await store.reopenMatter(matter.id, survivor);
+      await store.detachConclusion(conclusion.id, matter.id);
+      kept.push(conclusion);
+    }
+
+    // The fragment gives up its place in the accumulation, and the matter is
+    // brought back in line with what is left of it. This is the step that stops a
+    // withdrawn fragment from keeping a matter crossing the threshold — a matter
+    // that re-crossed on evidence nobody can read any more would have the product
+    // speaking about material the user has taken back.
+    //
+    // Keyed by the drop's identity rather than the moment it joined: a few
+    // fragments typed in one sitting carry the same timestamp to the millisecond,
+    // and forgetting the wrong mention would silently re-count the matter.
+    const dropId = facts.preview.dropId;
+    for (const matter of matters) {
+      if (matter.drops.some((mention) => mention.dropId === dropId)) {
+        await store.forgetMatterDrop(matter.id, dropId);
+      }
+    }
+
+    return kept;
+  }
+
+  /**
+   * Stop kept judgements from citing words that no longer exist.
+   *
+   * The one thing `original-only` edits, and it edits **support, never the
+   * sentence**. A judgement the user chose to keep is kept word for word — that is
+   * the promise of the choice — but what it names as the evidence behind it has to
+   * be something they can still read back. Rewriting the sentence instead would be
+   * keeping a different judgement than the one they saw; leaving the props alone
+   * would show them a claim resting on words they cannot find.
+   *
+   * Nothing takes the missing word's place: the domain does not know what the user
+   * meant by it, and a conclusion whose support was quietly padded would be
+   * explaining itself with evidence it never had.
+   *
+   * @param kept - the conclusions that survived.
+   * @param facts - what the one read of this drop turned up.
+   */
+  async function pruneSupport(
+    kept: readonly StoredConclusion[],
+    facts: DeletionFacts,
+  ): Promise<void> {
+    const going = new Set(facts.terms.map((term) => term.id));
+    if (going.size === 0) return;
+    const citing = kept.filter((conclusion) =>
+      conclusion.supportTermIds.some((termId) => going.has(termId)),
+    );
+    if (citing.length === 0) return;
+    await store.pruneConclusionSupport({
+      conclusionIds: citing.map((conclusion) => conclusion.id),
+      termIds: [...going],
+    });
+  }
+
   return {
     async drop(body: string): Promise<DropResult> {
       // What this drop asks of its reply, read once and used for two things:
@@ -1569,6 +1778,72 @@ export function createDomain(options: DomainCoreOptions): Domain {
       // could show the user an original the answer did not come from. Checking
       // the answer against the original is the reason a source is shown at all.
       return { kind: 'answered', answer, sources };
+    },
+
+    async previewDeletion(dropId: string): Promise<DeletionPreview | null> {
+      const drop = await store.findDrop(dropId);
+      // No such fragment is an answer, not a failure — the same reading `getDrop`
+      // takes. Nothing was looked at, so nothing may be claimed about what a
+      // deletion would take.
+      if (drop === null) return null;
+      return (await readDeletion(dropId, drop.body)).preview;
+    },
+
+    async deleteDrop(dropId: string, mode: DeletionMode): Promise<DeletionResult | null> {
+      // The decision the user arrived at by reading the preview, and it is a
+      // decision that removes nothing. Answered as null for the same reason an
+      // unknown drop is: nothing happened, and the caller is told so rather than
+      // handed a receipt for work that was never done.
+      if (mode === 'keep') return null;
+
+      const drop = await store.findDrop(dropId);
+      if (drop === null) return null;
+
+      // Read **once**, and used for both the announcement and the work. The two
+      // have to agree: a deletion that reported a different set from the one it
+      // announced would make the announcement worthless, and this is the one
+      // operation where that discrepancy is unrecoverable.
+      const facts = await readDeletion(dropId, drop.body);
+
+      // The conclusions go **first**, and the order is load-bearing rather than
+      // incidental: deleting the drop detaches it from its matter and can take
+      // the matter with it, which cascades to every conclusion that came out of
+      // it. Under `cascade` that is exactly what is wanted. Under
+      // `original-only` it is the opposite of what the user chose, so the ones
+      // they chose to keep are moved somewhere that survives before anything is
+      // deleted — see `carryOver`.
+      const kept = mode === 'cascade' ? [] : await carryOver(facts);
+      if (mode === 'cascade') {
+        await dropConclusions(facts.conclusions.map((conclusion) => conclusion.id));
+      }
+
+      // The drop itself. Everything the schema hangs off it goes by cascade: its
+      // items, its mentions, its place in its matter. Its **terms** do not — a
+      // word is one row per wording and may be said by several fragments, so which
+      // ones this deletion takes was worked out above and removed below.
+      await store.deleteDrop(dropId);
+
+      // The words this fragment was the last to say. Removed after the drop and in
+      // their own step, so the surviving words have already stopped pointing at a
+      // fragment that is gone before anything is deleted outright.
+      await store.deleteTerms({ termIds: facts.terms.map((term) => term.id), anchorTermId: null });
+
+      // Under `original-only` the kept judgements have to be stopped from citing
+      // words that no longer exist. What they cite is evidence, and evidence the
+      // user can no longer read is not evidence — so it goes, and nothing is
+      // invented in its place. The sentence itself is not touched: the user chose
+      // to keep it, and rewording it would be keeping a different sentence.
+      if (mode === 'original-only' && kept.length > 0) await pruneSupport(kept, facts);
+
+      return {
+        dropId,
+        // Under `cascade` this is what went; under `original-only` it is empty,
+        // because nothing came away but the original — which is the whole meaning
+        // of that choice, and reporting the kept ones here would read as a
+        // deletion that happened.
+        conclusions: mode === 'cascade' ? facts.preview.conclusions : [],
+        mode,
+      };
     },
   };
 }

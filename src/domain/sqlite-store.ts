@@ -37,6 +37,8 @@ import type {
   StoredSettlement,
   StoredSurfacing,
   StoredTerm,
+  SupportPrune,
+  TermRemoval,
   TermVector,
 } from './storage.ts';
 
@@ -78,6 +80,18 @@ import type {
  * about identity, and a term the model renamed would stop being the user's own
  * words. `term_in_drop_` is what makes "this drop said it" a fact of its own,
  * so a repeat mention is recorded without pretending the term is new.
+ *
+ * `origin_drop_id` is which fragment **first** said the wording, and it carries
+ * **no foreign key on purpose** — ticket 09's lesson, learned the hard way. It
+ * used to cascade, which read as harmless ("nothing exists without a source") and
+ * was not: a word is one row per wording, so 「好烦」 first said on Monday is a
+ * single term that Monday's, Tuesday's and Wednesday's fragments all mention.
+ * Deleting Monday's fragment then took the term by cascade, and Tuesday's and
+ * Wednesday's fragments silently lost a word they had said and still say. A
+ * cascade along a reference is only correct when the reference is the **only**
+ * thing holding the row up; here it is one of many, and which of them is left is
+ * exactly what the domain worked out before calling the delete. It writes NULL
+ * there instead when the origin goes.
  *
  * `link_` stores a pair once, under a canonical order of the two ids (the
  * smaller first), which is what the unique constraint enforces. `a_term_id`
@@ -132,7 +146,7 @@ CREATE INDEX IF NOT EXISTS item_by_drop ON item_ (drop_id);
 CREATE TABLE IF NOT EXISTS term_ (
   id             TEXT PRIMARY KEY,
   text           TEXT NOT NULL UNIQUE,
-  origin_drop_id TEXT NOT NULL REFERENCES drop_(id) ON DELETE CASCADE,
+  origin_drop_id TEXT,
   first_seen_at  TEXT NOT NULL,
   vector         TEXT
 );
@@ -469,6 +483,53 @@ function ensureColumn(db: DatabaseSync, table: string, column: string, definitio
 }
 
 /**
+ * Rebuild `term_` without the cascading reference ticket 09 removed.
+ *
+ * `ALTER TABLE` cannot drop a foreign key, so a database written before ticket 09
+ * would keep the old one and go on losing words when a fragment that first said
+ * them is deleted — the exact silent edit the schema change exists to stop. SQLite
+ * cannot disable foreign keys inside a transaction, so the rebuild runs with them
+ * off: the rename would otherwise be checked against `term_in_drop_` and `link_`,
+ * which reference `term_` by name and would briefly be pointing at nothing.
+ *
+ * It only runs on a database that still has the old shape; a file created from
+ * `SCHEMA` above is already right, and the check costs one `PRAGMA`.
+ */
+function dropTermOriginCascade(db: DatabaseSync): void {
+  const foreignKeys = db
+    .prepare('PRAGMA foreign_key_list(term_)')
+    .all() as unknown as { readonly from: string }[];
+  if (!foreignKeys.some((key) => key.from === 'origin_drop_id')) return;
+
+  db.exec('PRAGMA foreign_keys = OFF');
+  try {
+    db.exec('BEGIN');
+    db.exec(`
+      CREATE TABLE term_rebuilt (
+        id             TEXT PRIMARY KEY,
+        text           TEXT NOT NULL UNIQUE,
+        origin_drop_id TEXT,
+        first_seen_at  TEXT NOT NULL,
+        vector         TEXT
+      );
+      INSERT INTO term_rebuilt (id, text, origin_drop_id, first_seen_at, vector)
+        SELECT id, text, origin_drop_id, first_seen_at, vector FROM term_;
+      DROP TABLE term_;
+      ALTER TABLE term_rebuilt RENAME TO term_;
+    `);
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  } finally {
+    db.exec('PRAGMA foreign_keys = ON');
+  }
+  // Asked for and discarded, so the check cannot be optimised away and a
+  // violation introduced by the rebuild would surface here rather than later.
+  db.prepare('PRAGMA foreign_key_check').all();
+}
+
+/**
  * Open (creating if needed) a SQLite-backed store.
  *
  * @param file - path to the database file, or `':memory:'` for a throwaway one.
@@ -505,6 +566,9 @@ export function openSqliteStore(file: string): DropStore {
   // old file would make every item it already holds invisible to the list.
   // A dropped item is "to do" — that is what it was when it was caught.
   ensureColumn(db, 'item_', 'state', `TEXT NOT NULL DEFAULT '${DEFAULT_ITEM_STATE}'`);
+  // Ticket 09's schema change, for a file written by tickets 01–08. Not a column
+  // this time but a dropped reference, which `ALTER TABLE` cannot do.
+  dropTermOriginCascade(db);
 
   const insertDrop = db.prepare('INSERT INTO drop_ (id, body, dropped_at, reply) VALUES (?, ?, ?, ?)');
   const selectDrops = db.prepare(
@@ -603,6 +667,17 @@ export function openSqliteStore(file: string): DropStore {
     'UPDATE matter_ SET raised_count = raised_count + 1, last_at = ? WHERE id = ?',
   );
   const selectMatterForDrop = db.prepare('SELECT matter_id FROM matter_drop_ WHERE drop_id = ?');
+  const setMatterAnchor = db.prepare('UPDATE matter_ SET anchor_term_id = ? WHERE id = ?');
+  const countMatterDrops = db.prepare('SELECT COUNT(*) AS count FROM matter_drop_ WHERE matter_id = ?');
+  const setMatterDropAnchor = db.prepare(
+    'UPDATE matter_drop_ SET anchor_term_id = ? WHERE matter_id = ? AND anchor_term_id IS NULL',
+  );
+  const dropMatterTerm = db.prepare('DELETE FROM matter_term_ WHERE term_id = ?');
+  const dropConclusionSupport = db.prepare('DELETE FROM conclusion_support_ WHERE term_id = ?');
+  const deleteTerm = db.prepare('DELETE FROM term_ WHERE id = ?');
+  const deleteDropRow = db.prepare('DELETE FROM drop_ WHERE id = ?');
+  const setConclusionMatter = db.prepare('UPDATE conclusion_ SET matter_id = ? WHERE id = ?');
+  const deleteConclusionRow = db.prepare('DELETE FROM conclusion_ WHERE id = ?');
 
   const insertConclusion = db.prepare(
     `INSERT INTO conclusion_
@@ -692,6 +767,47 @@ export function openSqliteStore(file: string): DropStore {
       else bucket.push(row.term_id);
     }
     return grouped;
+  }
+
+  /**
+   * Bring a matter's count and span back in line with the drops it still holds.
+   *
+   * Recomputing rather than decrementing, because these two are supposed to be a
+   * summary of the `matter_drop_` rows and nothing else. A fragment that is
+   * withdrawn must leave the matter counting what is left — a matter that
+   * re-crossed the threshold on the strength of a fragment nobody can read any
+   * more would have the product speaking about material the user has taken back.
+   *
+   * A matter nothing is left in is removed outright. It has no evidence, so it
+   * has nothing to say, and a judgement assembled from it could only be the
+   * product talking to itself.
+   *
+   * @param matterId - the matter to bring up to date.
+   */
+  function recomputeMatter(matterId: string): void {
+    // Scoped in SQL rather than filtered in JS: this runs inside the deletion
+    // loop, and reading every mention in the database once per matter would make
+    // deleting one fragment cost more as the user's material grows.
+    const mine = (
+      db
+        .prepare('SELECT drop_id, anchor_term_id, at FROM matter_drop_ WHERE matter_id = ? ORDER BY at ASC, rowid ASC')
+        .all(matterId) as unknown as MatterDropRow[]
+    );
+    const [first] = mine;
+    if (first === undefined) {
+      // Cascades to its support and its conclusions: with no fragment behind it
+      // there is no evidence, and a judgement with no evidence is not a judgement.
+      db.prepare('DELETE FROM matter_ WHERE id = ?').run(matterId);
+      return;
+    }
+    const newest = mine[mine.length - 1];
+    if (newest === undefined) return;
+    db.prepare('UPDATE matter_ SET raised_count = ?, first_at = ?, last_at = ? WHERE id = ?').run(
+      mine.length,
+      first.at,
+      newest.at,
+      matterId,
+    );
   }
 
   return {
@@ -978,6 +1094,142 @@ export function openSqliteStore(file: string): DropStore {
 
     async resetPile(): Promise<void> {
       resetPileRow.run();
+    },
+
+    /**
+     * The deletes of ticket 09, each in one transaction.
+     *
+     * A transaction is not tidiness here: a half-finished deletion would leave
+     * the user's material in a state the product has no word for — a judgement
+     * whose evidence is partly gone, or a matter counting a fragment that is no
+     * longer there. There is no way back from a deletion, so there is nothing to
+     * be gained by allowing one to stop halfway.
+     */
+    async deleteTerms(removal: TermRemoval): Promise<void> {
+      if (removal.termIds.length === 0) return;
+      const placeholders = removal.termIds.map(() => '?').join(', ');
+      db.exec('BEGIN');
+      try {
+        // Hand every matter these words hold up over to a word that survives,
+        // and do it **before** the delete. A matter whose anchor goes cascades
+        // away with it — which is what `cascade` means and emphatically not what
+        // "this supporting word is no longer said" means.
+        if (removal.anchorTermId !== null) {
+          db.prepare(
+            `UPDATE matter_ SET anchor_term_id = ?
+              WHERE anchor_term_id IN (${placeholders})`,
+          ).run(removal.anchorTermId, ...removal.termIds);
+          // Only the mentions that had no feeling of their own: one that brought
+          // a feeling still points at a term nobody says, and is cleared first so
+          // this cannot be read as erasing a fact about the material.
+          db.prepare(
+            `UPDATE matter_drop_ SET anchor_term_id = ?
+              WHERE anchor_term_id IN (${placeholders})`,
+          ).run(removal.anchorTermId, ...removal.termIds);
+        }
+
+        // A matter's support must not name a word that is about to go, or the
+        // matter would carry evidence nobody can read. What it counts as raised
+        // is untouched: deleting one word the user said is not deleting the
+        // fragment they said it in.
+        for (const termId of removal.termIds) dropMatterTerm.run(termId);
+
+        // What a judgement cites is the evidence behind it. A prop that cannot be
+        // read back is not evidence, so it goes — and nothing takes its place:
+        // the store does not know what the user meant instead.
+        for (const termId of removal.termIds) dropConclusionSupport.run(termId);
+
+        for (const termId of removal.termIds) deleteTerm.run(termId);
+        db.exec('COMMIT');
+      } catch (error) {
+        db.exec('ROLLBACK');
+        throw error;
+      }
+    },
+
+    async deleteDrop(dropId: string): Promise<boolean> {
+      // One transaction, because two things have to happen together: the drop
+      // goes, and the words that survive it stop claiming it as where they came
+      // from. `term_` deliberately does **not** cascade on `origin_drop_id` (see
+      // the schema) — a word is one row per wording, so the fragment that first
+      // said it is one of several that say it, and deleting that fragment must
+      // not take the word out of the others' mouths.
+      db.exec('BEGIN');
+      try {
+        db.prepare('UPDATE term_ SET origin_drop_id = NULL WHERE origin_drop_id = ?').run(dropId);
+        // Everything else goes by itself: the mentions, the items, and the drop's
+        // place in its matter all reference `drop_` with `ON DELETE CASCADE`, and
+        // foreign keys are on for this connection. Writing those deletes out by
+        // hand would be a second, weaker copy of the schema.
+        const removed = deleteDropRow.run(dropId);
+        db.exec('COMMIT');
+        return removed.changes > 0;
+      } catch (error) {
+        db.exec('ROLLBACK');
+        throw error;
+      }
+    },
+
+    async reopenMatter(matterId: string, anchorTermId: string): Promise<readonly MatterDrop[]> {
+      // Only the anchor moves. No membership row is written: the matter is
+      // re-opened **around a word**, and a word is not a fragment — inventing a
+      // row in `matter_drop_` for it would be claiming a drop arrived, which is a
+      // fact about the user's material that did not happen. (It would also throw:
+      // that column references `drop_`, and there is no such drop to point at.)
+      //
+      // The mentions that brought no feeling of their own are re-pointed, so the
+      // support a later judgement is worded from still reads as one history.
+      db.exec('BEGIN');
+      try {
+        setMatterAnchor.run(anchorTermId, matterId);
+        setMatterDropAnchor.run(anchorTermId, matterId);
+        db.exec('COMMIT');
+      } catch (error) {
+        db.exec('ROLLBACK');
+        throw error;
+      }
+      return dropsByMatter().get(matterId) ?? [];
+    },
+
+    async forgetMatterDrop(matterId: string, dropId: string): Promise<boolean> {
+      const removed = db
+        .prepare('DELETE FROM matter_drop_ WHERE matter_id = ? AND drop_id = ?')
+        .run(matterId, dropId);
+      if (removed.changes === 0) return false;
+      recomputeMatter(matterId);
+      return true;
+    },
+
+    async detachConclusion(conclusionId: string, matterId: string): Promise<void> {
+      setConclusionMatter.run(matterId, conclusionId);
+    },
+
+    async deleteConclusion(conclusionId: string): Promise<boolean> {
+      // One statement. The surfacings that recorded it being shown go by cascade
+      // — a judgement that is gone cannot have been shown — and the conclusions
+      // that carried on from it are repaired to "opened the chain" rather than
+      // left pointing at a row nobody can read.
+      return deleteConclusionRow.run(conclusionId).changes > 0;
+    },
+
+    async pruneConclusionSupport(prune: SupportPrune): Promise<void> {
+      if (prune.conclusionIds.length === 0 || prune.termIds.length === 0) return;
+      // Bound per conclusion rather than as one `IN`-list for both: the statement
+      // is small, the lists are small, and a single statement taking two variadic
+      // lists would be unreadable for no gain at this size.
+      const drop = db.prepare(
+        'DELETE FROM conclusion_support_ WHERE conclusion_id = ? AND term_id = ?',
+      );
+      db.exec('BEGIN');
+      try {
+        for (const conclusionId of prune.conclusionIds) {
+          for (const termId of prune.termIds) drop.run(conclusionId, termId);
+        }
+        db.exec('COMMIT');
+      } catch (error) {
+        db.exec('ROLLBACK');
+        throw error;
+      }
     },
 
     async listDrops(): Promise<readonly StoredDrop[]> {
