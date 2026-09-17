@@ -17,8 +17,9 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { INPUT_TYPES, LINK_KINDS, CONCLUSION_KINDS, CONCLUSION_RELATIONS, CONCLUSION_TIERS } from './interface.ts';
-import type { ConclusionKind, ConclusionRelation, ConclusionTier, InputType, LinkKind } from './interface.ts';
+import type { ConclusionKind, ConclusionRelation, ConclusionTier, InputType, ItemState, LinkKind } from './interface.ts';
 import { orderedPair } from './linking.ts';
+import { DEFAULT_ITEM_STATE, readItemState } from './scheduling.ts';
 import type {
   DropStore,
   ExtractOutcome,
@@ -62,6 +63,13 @@ import type {
  *
  * `item_.drop_id` cascades. Deleting a drop takes its items with it; ticket 09
  * relies on this to leave no orphan rows behind.
+ *
+ * `item_.state` is where an item stands — `'todo'` or `'done'` — and it is the
+ * one thing in this schema the **user** writes. It defaults to `'todo'` rather
+ * than being nullable, because an item exists because something was asked of the
+ * user: there is no reading on which a freshly caught one is anything else.
+ * Ticket 08 adds it, and a database written before that gets the column added
+ * with the same default — see the migration below.
  *
  * `term_` holds one row per **wording**, unique on the text. That is the whole
  * deduplication rule, and it is deliberately the literal one: "想学吉他" said
@@ -115,6 +123,7 @@ CREATE TABLE IF NOT EXISTS item_ (
   drop_id   TEXT NOT NULL REFERENCES drop_(id) ON DELETE CASCADE,
   text      TEXT NOT NULL,
   due_at    TEXT,
+  state     TEXT NOT NULL DEFAULT 'todo',
   caught_at TEXT NOT NULL
 );
 
@@ -292,6 +301,7 @@ interface ItemRow {
   readonly drop_id: string;
   readonly text: string;
   readonly due_at: string | null;
+  readonly state: string | null;
 }
 
 /** A term row as SQLite hands it back. */
@@ -347,6 +357,7 @@ function toStoredItem(row: ItemRow): StoredItem {
     dropId: row.drop_id,
     text: row.text,
     dueAt: row.due_at,
+    state: readItemState(row.state),
   };
 }
 
@@ -488,6 +499,12 @@ export function openSqliteStore(file: string): DropStore {
   // column existed has none either — such a conclusion is simply never surfaced,
   // which is the honest reading of a sentence nobody kept the words of.
   ensureColumn(db, 'conclusion_', 'claim', 'TEXT');
+  // Ticket 08's column, for a file written by tickets 02–07. Added WITH a
+  // default, unlike the others: this is the one column a rule reads
+  // (`upcomingFrom` counts only what is still to do), so leaving it null in an
+  // old file would make every item it already holds invisible to the list.
+  // A dropped item is "to do" — that is what it was when it was caught.
+  ensureColumn(db, 'item_', 'state', `TEXT NOT NULL DEFAULT '${DEFAULT_ITEM_STATE}'`);
 
   const insertDrop = db.prepare('INSERT INTO drop_ (id, body, dropped_at, reply) VALUES (?, ?, ?, ?)');
   const selectDrops = db.prepare(
@@ -501,14 +518,18 @@ export function openSqliteStore(file: string): DropStore {
   const setReply = db.prepare('UPDATE drop_ SET reply = ? WHERE id = ?');
   const deleteItemsForDrop = db.prepare('DELETE FROM item_ WHERE drop_id = ?');
   const insertItem = db.prepare(
-    'INSERT INTO item_ (id, drop_id, text, due_at, caught_at) VALUES (?, ?, ?, ?, ?)',
+    'INSERT INTO item_ (id, drop_id, text, due_at, state, caught_at) VALUES (?, ?, ?, ?, ?, ?)',
   );
   const selectItems = db.prepare(
-    'SELECT id, drop_id, text, due_at FROM item_ ORDER BY caught_at ASC, rowid ASC',
+    'SELECT id, drop_id, text, due_at, state FROM item_ ORDER BY caught_at ASC, rowid ASC',
   );
   const selectItemsForDrop = db.prepare(
-    'SELECT id, drop_id, text, due_at FROM item_ WHERE drop_id = ? ORDER BY caught_at ASC, rowid ASC',
+    'SELECT id, drop_id, text, due_at, state FROM item_ WHERE drop_id = ? ORDER BY caught_at ASC, rowid ASC',
   );
+  const selectItem = db.prepare(
+    'SELECT id, drop_id, text, due_at, state FROM item_ WHERE id = ?',
+  );
+  const updateItemState = db.prepare('UPDATE item_ SET state = ? WHERE id = ?');
   const insertTerm = db.prepare(
     `INSERT INTO term_ (id, text, origin_drop_id, first_seen_at, vector)
      VALUES (?, ?, ?, ?, NULL)
@@ -711,7 +732,12 @@ export function openSqliteStore(file: string): DropStore {
         // its items are half-written.
         deleteItemsForDrop.run(dropId);
         for (const item of outcome.items) {
-          insertItem.run(randomUUID(), dropId, item.text, item.dueAt, saidAt);
+          // An item is caught **to do**: re-running extraction after the user has
+          // ticked something off replaces the items, and it would be wrong to
+          // quietly carry a decision of theirs across onto a row the drop just
+          // produced. What is re-read is what the drop contained, which is not
+          // what they have since done about it.
+          insertItem.run(randomUUID(), dropId, item.text, item.dueAt, DEFAULT_ITEM_STATE, saidAt);
         }
         setInputType.run(outcome.inputType, dropId);
 
@@ -972,6 +998,17 @@ export function openSqliteStore(file: string): DropStore {
     async listItemsForDrop(dropId: string): Promise<readonly StoredItem[]> {
       const rows = selectItemsForDrop.all(dropId) as unknown as ItemRow[];
       return rows.map(toStoredItem);
+    },
+
+    async setItemState(itemId: string, state: ItemState): Promise<StoredItem | null> {
+      const changed = updateItemState.run(state, itemId);
+      // Not found is an answer, not a failure — the same reading `findDrop`
+      // takes. Reading the row back afterwards rather than assembling it from
+      // the arguments keeps the two from drifting: what a caller gets is what
+      // the store now holds.
+      if (changed.changes === 0) return null;
+      const row = selectItem.get(itemId) as unknown as ItemRow | undefined;
+      return row === undefined ? null : toStoredItem(row);
     },
 
     async close(): Promise<void> {

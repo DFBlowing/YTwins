@@ -14,6 +14,7 @@ import type {
   ConclusionRelation,
   ConclusionTier,
   InputType,
+  ItemState,
   LinkKind,
 } from './interface.ts';
 
@@ -59,6 +60,8 @@ export interface StoredItem {
   readonly text: string;
   /** When it is due, or null when no time was parsed. */
   readonly dueAt: string | null;
+  /** Whether it is still to do, or done. */
+  readonly state: ItemState;
   /** The drop it came from. */
   readonly dropId: string;
 }
@@ -440,6 +443,22 @@ export interface DropStore {
 
   /** The items parsed out of one drop, in the order they were caught. */
   listItemsForDrop(dropId: string): Promise<readonly StoredItem[]>;
+
+  /**
+   * Record where one item now stands: still to do, or done.
+   *
+   * A write of its own rather than part of `recordExtraction`, because the two
+   * are about different things and happen at different times: extraction says
+   * what the drop turned out to contain, and this says what the user did about
+   * it afterwards. It is also the only thing the user ever changes in this
+   * product (`CONTEXT.md`, 无感 — nothing is asked of them, but a list of what
+   * to do is theirs to tick off).
+   *
+   * @param itemId - the item being advanced.
+   * @param state - where it now stands.
+   * @returns the item as it now stands, or null when there is no such item.
+   */
+  setItemState(itemId: string, state: ItemState): Promise<StoredItem | null>;
 
   /**
    * Remember what a term was encoded as.

@@ -228,6 +228,56 @@ export function createHandler(domain: Domain) {
       return;
     }
 
+    // What is still to do, arranged on the timeline (**scheduling**, 08). Two
+    // lists rather than one, and the split is the domain's: an item with a time
+    // is placed on it, an item without one is kept apart, and neither is dropped.
+    // The rule is not restated here — a page that decided the split itself could
+    // disagree with the domain about which list an item belongs in.
+    if (request.method === 'GET' && url === '/api/upcoming') {
+      try {
+        sendJson(response, 200, await domain.upcoming());
+      } catch {
+        sendJson(response, 500, { error: '读取失败' });
+      }
+      return;
+    }
+
+    // Advance one item's state — todo to done, or back again. The product's only
+    // write besides dropping, and the only thing the user ever changes
+    // (`CONTEXT.md`, 无感: nothing else is asked of them).
+    if (request.method === 'POST' && url.startsWith('/api/items/')) {
+      try {
+        const parsed = JSON.parse(await readBody(request)) as { state?: unknown };
+        const state = parsed.state;
+        // An unknown state is refused rather than passed through: the domain
+        // would default it, and a page that sent nonsense by mistake should hear
+        // about it instead of watching the item come back unchanged.
+        if (state !== 'todo' && state !== 'done') {
+          sendJson(response, 400, { error: '不认识的状态' });
+          return;
+        }
+        const itemId = decodeURIComponent(url.slice('/api/items/'.length));
+        if (itemId.length === 0) {
+          sendJson(response, 400, { error: '没说是哪一件事' });
+          return;
+        }
+        const item = await domain.setItemState(itemId, state);
+        // Not found is a 404 here rather than a 200 with null: unlike "nothing
+        // covers this question", there is no honest page state for "the item you
+        // just ticked does not exist" — the client asked about a specific row.
+        if (item === null) {
+          sendJson(response, 404, { error: '没有这件事' });
+          return;
+        }
+        sendJson(response, 200, { item });
+      } catch (error) {
+        sendJson(response, 500, {
+          error: error instanceof Error ? error.message : '改不动这件事',
+        });
+      }
+      return;
+    }
+
     // Every link grown between the user's terms. Its own endpoint rather than
     // part of a drop, because a link belongs to no single drop: it is what the
     // drops added up to. Each one carries its reason and strength, so the page

@@ -217,6 +217,107 @@ body {
   color: var(--ink-soft);
 }
 
+/* Scheduling (08). Its own section ABOVE the drops, because it is what the page
+   is opened for: the question is "what now?", and the record of what was said is
+   what you scroll to afterwards. Two lists rather than one — a dated item and an
+   undated one are different facts, and putting them in one column would imply an
+   order the second can never have. */
+.schedule {
+  margin-top: 2rem;
+}
+
+.schedule-note {
+  margin: 0 0 1rem;
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+}
+
+.schedule-subtitle {
+  margin: 1.5rem 0 0.5rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--ink-soft);
+}
+
+.schedule-problem {
+  margin: 0.75rem 0 0;
+  padding: 0.5rem 0.75rem;
+  border-left: 3px solid var(--accent);
+  background: #fff;
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+}
+
+.due-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.due-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.7rem;
+  padding: 0.55rem 0.9rem;
+  border-left: 3px solid var(--accent);
+  background: #fff;
+}
+
+.due-row + .due-row {
+  margin-top: 0.35rem;
+}
+
+/* An unscheduled item is a normal outcome, not a warning: dashed like the
+   not-yet placeholder and never coloured, because nothing went wrong. */
+.due-row-none {
+  border-left: 3px dashed var(--line);
+}
+
+/* The one control in the product. Drawn as a quiet box rather than a bright
+   button: ticking something off is not the point of the page, it is what you do
+   on the way past. */
+.due-toggle {
+  flex: none;
+  padding: 0.1rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.due-toggle:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.due-toggle:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.due-text {
+  flex: 1;
+  word-break: break-word;
+}
+
+.due-when {
+  flex: none;
+  font-size: 0.8rem;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+/* Past its date. It is drawn in the ordinary accent rather than in red — nothing
+   is wrong, it is simply the thing most worth doing, which is why the domain
+   sorted it to the top. */
+.due-when-past {
+  color: var(--ink);
+  font-weight: 600;
+}
+
 /* The terms this drop yielded (04). Chips rather than a list, because they are
    fragments of the user's own sentence, not rows of anything. Indented like the
    items so they read as belonging to the drop above them. */

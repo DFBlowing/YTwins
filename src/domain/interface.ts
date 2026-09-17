@@ -25,6 +25,20 @@ export type InputType = 'emotion' | 'decision' | 'item' | 'idea';
 export const INPUT_TYPES: readonly InputType[] = ['emotion', 'decision', 'item', 'idea'];
 
 /**
+ * Where an item stands: still to do, or done.
+ *
+ * Two values rather than a status the user picks from, because the product's
+ * promise is that nothing is asked of them. An item is **todo** the moment it is
+ * caught, and the only thing anyone ever does to it is say it is finished —
+ * there is no "in progress", no priority, no category, and none of those is
+ * coming. What the two are for is the list: it says what is still to do.
+ */
+export type ItemState = 'todo' | 'done';
+
+/** Every state, so the store can read one back and refuse to invent one. */
+export const ITEM_STATES: readonly ItemState[] = ['todo', 'done'];
+
+/**
  * One thing the drop asked the user to do later.
  *
  * An item is bound to time when the drop said when; otherwise it is
@@ -43,6 +57,8 @@ export interface Item {
    * from anything time-bound, and it appears on no date.
    */
   readonly dueAt: string | null;
+  /** Whether it is still to do, or done. */
+  readonly state: ItemState;
   /** The drop this item was parsed out of. Nothing exists without a source. */
   readonly dropId: string;
 }
@@ -504,6 +520,33 @@ export interface SurfacingOptions {
 }
 
 /**
+ * What is still to do, arranged on the timeline.
+ *
+ * A named shape rather than two return values or one list with a flag, because
+ * the two halves answer different questions and a caller has to have decided
+ * which it is showing: **due** is ordered by when, and **unscheduled** has no
+ * when to be ordered by. A single list would put an item with no date next to
+ * one with a date and let the page imply an order that does not exist.
+ */
+export interface Upcoming {
+  /**
+   * Everything with a time, soonest first.
+   *
+   * Overdue items are at the front of it, still dated: a deadline that has
+   * passed is the thing most worth doing, not the thing to stop showing.
+   */
+  readonly due: readonly Item[];
+  /**
+   * Everything with no parsed time, oldest first.
+   *
+   * Kept and listed. This list is the product's promise that nothing typed is
+   * silently lost, so an empty one means the user has said nothing undated —
+   * never "this was not worth showing".
+   */
+  readonly unscheduled: readonly Item[];
+}
+
+/**
  * The domain core.
  *
  * Ticket 01 opened exactly one operation: **dropping**. Ticket 02 opened what
@@ -517,10 +560,11 @@ export interface SurfacingOptions {
  * first: a conclusion may be **surfaced** — shown to the user on a drop that
  * carries a feeling, or when the user asks — at most one per turn, never twice
  * for the same topic inside a week, and only if it is stated as an observation
- * rather than as a fact. The remaining operations named in the spec's interface
- * (scheduling, deletion, and what the user may do to a conclusion) arrive with
- * their own tickets — this interface grows, it does not get pre-declared with
- * stubs that would fake behaviour.
+ * rather than as a fact. Ticket 08 opens **scheduling**: the items caught so far,
+ * placed on the timeline and read as what is still to do. The remaining
+ * operations named in the spec's interface (deletion, and what the user may do
+ * to a conclusion) arrive with their own tickets — this interface grows, it does
+ * not get pre-declared with stubs that would fake behaviour.
  */
 export interface Domain {
   /**
@@ -573,6 +617,46 @@ export interface Domain {
    * @returns every item caught so far.
    */
   listItems(): Promise<readonly Item[]>;
+
+  /**
+   * The items still to do, soonest first, with the undated ones kept apart.
+   *
+   * This is **scheduling**: everything time-bound is placed on the timeline
+   * whether or not anyone filled a date in, and what has no time is listed
+   * rather than dropped. Two lists and not one, because "due on Thursday" and
+   * "no date at all" are different facts, and merging them would either invent
+   * a date for the second or hide it behind the first.
+   *
+   * **Soonest first, and that includes what is already overdue** — a date that
+   * has passed sorts to the front rather than falling off, because it is the
+   * thing most worth doing. An item that is **done** is in neither list: the
+   * question this answers is what is still to do.
+   *
+   * The due times are read against the domain's own clock, the same one every
+   * other decision is made from, so "what is due" is the same answer twice in a
+   * row and a check can pin the moment rather than wait for one.
+   *
+   * There is deliberately no calendar here and no notion of two things clashing.
+   * The product does not tell the user their evening is overbooked; it tells
+   * them what is coming.
+   *
+   * @returns the dated items soonest first, and the undated ones oldest first.
+   */
+  upcoming(): Promise<Upcoming>;
+
+  /**
+   * Advance one item's **state** — from todo to done, or back again.
+   *
+   * Reversible on purpose: a box ticked by mistake must be untickable, and
+   * "done" is a fact the user corrects rather than a commitment they made. The
+   * change is written down, so it survives a refresh, a restart and a new
+   * session — the whole point of a list is that it remembers.
+   *
+   * @param itemId - identity of the item to advance.
+   * @param state - where it now stands.
+   * @returns the item as it now stands, or null when there is no such item.
+   */
+  setItemState(itemId: string, state: ItemState): Promise<Item | null>;
 
   /**
    * Every **link** that has grown between the user's terms.

@@ -45,7 +45,7 @@
  * nothing here for the user to press: settling needs no participation, which is
  * the whole point of the feature.
  *
- * What act three shows after ticket 06: the one moment the product speaks first.
+ * What act one shows after ticket 06: the one moment the product speaks first.
  * An emotional drop, or a question, makes the domain try to **surface** a
  * conclusion — at most one, never the same topic twice in a week, and never a
  * sentence that reads as a fact. The page shows what came of the attempt, and a
@@ -54,6 +54,17 @@
  * ask at all is its own line, because those are different facts. The line itself
  * is never the page's to word — the conclusion was already written, and surfacing
  * picks which one, not how it reads.
+ *
+ * What act one shows after ticket 08: what is still to do. Opening the page is
+ * meant to answer "what now?" on its own, so the **items** come first, arranged
+ * on the timeline by the domain — soonest at the top, overdue ones leading it
+ * rather than falling off — with everything that had no parsed time listed apart
+ * as 「待安排」 rather than dropped. The order is not the page's to decide: it is
+ * read from `/api/upcoming`, which is the domain's own answer, and the only thing
+ * this file does with an item is draw it and let the user tick it off. There is
+ * no calendar here and no conflict detection, and there is deliberately nothing
+ * scheduling-shaped about a drop either — the user still types no time, and the
+ * item already carries whatever time was read out of what they said.
  */
 
 /** One item parsed out of a drop, as the server reports it. */
@@ -61,7 +72,21 @@ interface Item {
   readonly id: string;
   readonly text: string;
   readonly dueAt: string | null;
+  /** Still to do, or done. The one thing the user ever changes here. */
+  readonly state: 'todo' | 'done';
   readonly dropId: string;
+}
+
+/**
+ * What is still to do, arranged on the timeline, as the server reports it.
+ *
+ * Mirrors the domain's shape rather than flattening it into one list: the two
+ * halves mean different things, and a page that merged them would be implying an
+ * order for items that have no date to be ordered by.
+ */
+interface Upcoming {
+  readonly due: readonly Item[];
+  readonly unscheduled: readonly Item[];
 }
 
 /**
@@ -208,6 +233,12 @@ const linkEmpty = mustFind<HTMLParagraphElement>('#link-empty');
 const conclusionList = mustFind<HTMLOListElement>('#conclusion-list');
 const conclusionEmpty = mustFind<HTMLParagraphElement>('#conclusion-empty');
 
+const dueList = mustFind<HTMLUListElement>('#due-list');
+const dueEmpty = mustFind<HTMLParagraphElement>('#due-empty');
+const unscheduledList = mustFind<HTMLUListElement>('#unscheduled-list');
+const unscheduledEmpty = mustFind<HTMLParagraphElement>('#unscheduled-empty');
+const scheduleProblem = mustFind<HTMLParagraphElement>('#schedule-problem');
+
 const askForm = mustFind<HTMLFormElement>('#ask-form');
 const askInput = mustFind<HTMLInputElement>('#ask-input');
 const askSend = mustFind<HTMLButtonElement>('#ask-send');
@@ -285,12 +316,169 @@ const LINK_GRACE_POLLS = 4;
  */
 const SURFACE_GRACE_POLLS = 3;
 
+/**
+ * The moment an item's due time names, or null when it names none.
+ *
+ * One reading, because two places need it — the drop's own item list and the
+ * scheduling list — and a due time that one of them decided was usable and the
+ * other did not would show the same item two different ways. A time the clock
+ * cannot parse counts as no time at all: it is not a date anybody can render,
+ * which is also why the domain files such an item under 「待安排」.
+ */
+function dueMoment(dueAt: string | null): Date | null {
+  if (dueAt === null) return null;
+  const when = new Date(dueAt);
+  return Number.isNaN(when.getTime()) ? null : when;
+}
+
 /** Format a due time in Chinese terms, or say plainly that none was found. */
 function formatDue(dueAt: string | null): string {
-  if (dueAt === null) return '待安排';
-  const when = new Date(dueAt);
-  if (Number.isNaN(when.getTime())) return '待安排';
+  const when = dueMoment(dueAt);
+  if (when === null) return '待安排';
   return when.toLocaleString('zh-CN', { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+/**
+ * How one item's time reads on the scheduling list (08).
+ *
+ * Relative where that is the useful thing — 「今天」「明天」「已过期」 is what someone
+ * opening the page needs to know — and the calendar date either way, because
+ * "tomorrow at what time" is the next question. Nothing here decides anything:
+ * the order came from the domain, and this only says what each entry is.
+ */
+function dueLabel(item: Item): string {
+  const when = dueMoment(item.dueAt);
+  if (when === null) return '待安排';
+  const clock = when.toLocaleString('zh-CN', { dateStyle: 'short', timeStyle: 'short' });
+
+  const startOfDay = (value: Date): number =>
+    new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
+  const days = Math.round((startOfDay(when) - startOfDay(new Date())) / 86_400_000);
+  if (days < 0) return `已过期 · ${clock}`;
+  if (days === 0) return `今天 · ${clock}`;
+  if (days === 1) return `明天 · ${clock}`;
+  return clock;
+}
+
+/**
+ * Render one item of the scheduling list, with the box that advances it.
+ *
+ * The whole row is the control rather than a small checkbox: this is the one
+ * thing in the product the user ever presses, and it is meant to be answerable
+ * at a glance when the page is opened to find out what to do.
+ *
+ * An **unscheduled** item gets the same control and no date. It is not a lesser
+ * entry — it is the promise that nothing typed is silently lost — so it is drawn
+ * like the others and only the time is missing.
+ */
+function renderScheduledItem(item: Item, dated: boolean): HTMLLIElement {
+  const row = document.createElement('li');
+  row.className = dated ? 'due-row' : 'due-row due-row-none';
+
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'due-toggle';
+  toggle.dataset['itemId'] = item.id;
+  toggle.setAttribute('aria-label', `标记「${item.text}」为已办`);
+  toggle.textContent = '未办';
+
+  const text = document.createElement('span');
+  text.className = 'due-text';
+  text.textContent = item.text;
+
+  row.append(toggle, text);
+  if (!dated) return row;
+
+  const label = dueLabel(item);
+  const due = document.createElement('time');
+  due.className = label.startsWith('已过期') ? 'due-when due-when-past' : 'due-when';
+  if (item.dueAt !== null) due.dateTime = item.dueAt;
+  due.textContent = label;
+  row.append(due);
+  return row;
+}
+
+/**
+ * Show what is still to do.
+ *
+ * Its own read rather than part of a drop, because the list is not a drop's
+ * property: it is every drop's items at once, arranged on the timeline. A read
+ * that failed leaves the lists as they were and says so — "we could not read it"
+ * and "there is nothing to do" are different facts, the distinction every other
+ * load on this page draws too.
+ */
+async function loadUpcoming(): Promise<void> {
+  try {
+    const response = await fetch('/api/upcoming');
+    if (!response.ok) throw new Error('read failed');
+    const upcoming = (await response.json()) as Upcoming;
+
+    dueList.replaceChildren(...upcoming.due.map((item) => renderScheduledItem(item, true)));
+    dueEmpty.hidden = upcoming.due.length > 0;
+    unscheduledList.replaceChildren(
+      ...upcoming.unscheduled.map((item) => renderScheduledItem(item, false)),
+    );
+    unscheduledEmpty.hidden = upcoming.unscheduled.length > 0;
+    scheduleProblem.textContent = '';
+  } catch {
+    scheduleProblem.textContent = '这次没读到待办列表，稍后再试试。';
+  }
+}
+
+/**
+ * Advance one item, and show the list as it now stands.
+ *
+ * The list is re-read from the server rather than edited in place: the order the
+ * domain put it in is the thing being shown, and a page that removed a row by
+ * hand would be keeping a second opinion about it. Finishing something is also
+ * the one case where a row legitimately disappears, so the re-read is the honest
+ * way to show that it did.
+ */
+async function advanceItem(itemId: string, button: HTMLButtonElement): Promise<void> {
+  button.disabled = true;
+  try {
+    const response = await fetch(`/api/items/${encodeURIComponent(itemId)}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ state: 'done' }),
+    });
+    if (!response.ok) {
+      scheduleProblem.textContent = '没能改成已办，再试一次。';
+      return;
+    }
+    scheduleProblem.textContent = '';
+    await loadUpcoming();
+  } catch {
+    scheduleProblem.textContent = '连不上本地服务。';
+  } finally {
+    button.disabled = false;
+  }
+}
+
+/**
+ * The two lists, which are one control surface.
+ *
+ * Both are drawn with the same row and the same button, so both have to answer
+ * the same click — a 「待安排」 entry is not a lesser item, it is an item whose
+ * time nobody knew, and a button that did nothing on one list and worked on the
+ * other would be the page lying about which entries it can act on.
+ */
+const scheduleLists: readonly HTMLUListElement[] = [dueList, unscheduledList];
+
+/**
+ * One delegated listener per list.
+ *
+ * Delegated rather than one listener per row because the rows are replaced on
+ * every read: a listener attached to a row would be thrown away with it, and the
+ * one that replaced it would have to remember to attach its own.
+ */
+for (const scheduleList of scheduleLists) {
+  scheduleList.addEventListener('click', (event) => {
+    const button = (event.target as Element | null)?.closest<HTMLButtonElement>('.due-toggle');
+    const itemId = button?.dataset['itemId'];
+    if (button === null || button === undefined || itemId === undefined) return;
+    void advanceItem(itemId, button);
+  });
 }
 
 /** Render one item: what it is, and when it is due (or that it is not). */
@@ -467,6 +655,10 @@ async function settleAccumulation(): Promise<void> {
   for (let attempt = 0; attempt < LINK_GRACE_POLLS; attempt += 1) {
     await loadLinks();
     await loadConclusions();
+    // The scheduling list is read on the same rounds, and for the same reason a
+    // third time: a fragment that carried a time has its item written behind the
+    // reading, and the page cannot see which of its background jobs has landed.
+    await loadUpcoming();
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
 }
@@ -992,4 +1184,5 @@ for (const tab of document.querySelectorAll<HTMLButtonElement>('.act-tab')) {
 void loadDrops();
 void loadLinks();
 void loadConclusions();
+void loadUpcoming();
 void refreshSurfaceAgain();

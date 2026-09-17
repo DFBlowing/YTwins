@@ -23,6 +23,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 
 import { createDomain } from './core.ts';
 import type { ConclusionPolicy } from './conclusions.ts';
@@ -346,6 +347,257 @@ await check('an item with no parsed time is kept as unscheduled, on no date', as
       const [item] = await domain.listItems();
       assert.ok(item !== undefined, 'the item is kept rather than silently dropped');
       assert.equal(item.dueAt, null, 'no date was invented for it');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+console.log('\ndomain core — items landing on time');
+
+/**
+ * A fragment whose items are scripted with the times its check is about.
+ *
+ * The times are worked examples rather than "now + a day", so the expected
+ * order below is a literal the check wrote down rather than the same arithmetic
+ * the domain performs — an assertion that recomputed the answer could never
+ * disagree with the code.
+ */
+function timedProvider(
+  readings: readonly (readonly [body: string, items: readonly { readonly text: string; readonly dueAt: string | null }[]])[],
+): ReturnType<typeof createFakeProvider> {
+  const extractByBody: Record<string, ExtractScript> = {};
+  for (const [body, items] of readings) {
+    extractByBody[body] = { kind: 'read', reading: { inputType: 'item', items } };
+  }
+  return createFakeProvider({ extractByBody });
+}
+
+/** Wait until every item a check expects has been read out of its drop. */
+async function readItems(domain: Domain, count: number): Promise<void> {
+  await settledUntil(async () => (await domain.listItems()).length >= count);
+}
+
+/**
+ * Four fragments: one plainly in the past, two days apart in the future, and one
+ * with nothing to go on. Read against a pinned moment, so three of them are due
+ * (one of them overdue) and the last is unscheduled.
+ */
+const OVERDUE_DROP = '上周五已经把初稿交了';
+const SOON_DROP = '明天上午十点去交提纲';
+const LATER_DROP = '下周一约导师谈论文';
+const UNDATED_DROP = '想去学吉他，还想去爬山';
+
+const TIMED_READINGS = [
+  [OVERDUE_DROP, [{ text: '交初稿', dueAt: '2026-09-11T09:00:00.000Z' }]],
+  [SOON_DROP, [{ text: '交提纲', dueAt: '2026-09-21T02:00:00.000Z' }]],
+  [LATER_DROP, [{ text: '约导师谈论文', dueAt: '2026-09-28T01:00:00.000Z' }]],
+  [UNDATED_DROP, [{ text: '学吉他', dueAt: null }]],
+] as const;
+
+/** The moment the scheduling checks read the list as of. */
+const SCHEDULING_NOW = '2026-09-20T12:00:00.000Z';
+
+/** Build the four fragments' items, and hand the domain back. */
+async function schedulingFixture(file: string): Promise<Domain> {
+  const store = openSqliteStore(file);
+  try {
+    const domain = createDomain({
+      store,
+      provider: timedProvider(TIMED_READINGS),
+      now: () => SCHEDULING_NOW,
+    });
+    for (const [body] of TIMED_READINGS) await domain.drop(body);
+    await readItems(domain, 4);
+    return domain;
+  } finally {
+    await store.close();
+  }
+}
+
+await check('an item is placed on the timeline from the drop alone, with no time typed', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const domain = createDomain({
+        store,
+        provider: timedProvider(TIMED_READINGS),
+        now: () => SCHEDULING_NOW,
+      });
+      for (const [body] of TIMED_READINGS) await domain.drop(body);
+      await readItems(domain, 4);
+
+      const upcoming = await domain.upcoming();
+      assert.deepEqual(
+        upcoming.due.map((item) => item.text),
+        ['交初稿', '交提纲', '约导师谈论文'],
+        'placed by their own times, with no time typed by anybody',
+      );
+      assert.deepEqual(
+        upcoming.due.map((item) => item.dueAt),
+        ['2026-09-11T09:00:00.000Z', '2026-09-21T02:00:00.000Z', '2026-09-28T01:00:00.000Z'],
+        'soonest first, and the one already past leads rather than falling off',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('an item with no parsed time is listed apart, not dropped', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const domain = createDomain({
+        store,
+        provider: timedProvider(TIMED_READINGS),
+        now: () => SCHEDULING_NOW,
+      });
+      for (const [body] of TIMED_READINGS) await domain.drop(body);
+      await readItems(domain, 4);
+
+      const upcoming = await domain.upcoming();
+      assert.deepEqual(
+        upcoming.unscheduled.map((item) => item.text),
+        ['学吉他'],
+        'kept, and kept apart from anything with a date',
+      );
+      assert.equal(upcoming.unscheduled[0]?.dueAt, null, 'and no date was invented for it');
+      assert.equal(upcoming.due.length, 3, 'it did not quietly join the timeline either');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check("an item's state advances, and stays advanced across a restart", async () => {
+  await withDatabase(async (file) => {
+    const first = openSqliteStore(file);
+    const marked = await (async () => {
+      try {
+        const domain = createDomain({
+          store: first,
+          provider: timedProvider(TIMED_READINGS),
+          now: () => SCHEDULING_NOW,
+        });
+        for (const [body] of TIMED_READINGS) await domain.drop(body);
+        await readItems(domain, 4);
+
+        const [soonest] = (await domain.upcoming()).due;
+        assert.ok(soonest !== undefined);
+        assert.equal(soonest.state, 'todo', 'everything starts to do');
+
+        const advanced = await domain.setItemState(soonest.id, 'done');
+        assert.equal(advanced?.state, 'done', 'the item comes back as it now stands');
+        return soonest;
+      } finally {
+        await first.close();
+      }
+    })();
+
+    // A second process against the same file — what a page refresh does to the
+    // server's view of it.
+    const second = openSqliteStore(file);
+    try {
+      const reopened = createDomain({ store: second, now: () => SCHEDULING_NOW });
+      const upcoming = await reopened.upcoming();
+      assert.ok(
+        !upcoming.due.some((item) => item.id === marked.id),
+        'a finished item is not in the list of what is still to do',
+      );
+      assert.equal(
+        (await reopened.listItems()).find((item) => item.id === marked.id)?.state,
+        'done',
+        'the state is on disk, not in the process',
+      );
+    } finally {
+      await second.close();
+    }
+  });
+});
+
+await check('an item can be put back to to-do, so a mistaken tick is undoable', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const domain = createDomain({
+        store,
+        provider: timedProvider(TIMED_READINGS),
+        now: () => SCHEDULING_NOW,
+      });
+      for (const [body] of TIMED_READINGS) await domain.drop(body);
+      await readItems(domain, 4);
+
+      const [soonest] = (await domain.upcoming()).due;
+      assert.ok(soonest !== undefined);
+      await domain.setItemState(soonest.id, 'done');
+      await domain.setItemState(soonest.id, 'todo');
+
+      assert.deepEqual(
+        (await domain.upcoming()).due.map((item) => item.text),
+        ['交初稿', '交提纲', '约导师谈论文'],
+        'back where it was, with no second copy of it anywhere',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('advancing an item that does not exist is null, not an error', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const domain = createDomain({ store });
+      assert.equal(await domain.setItemState('no-such-item', 'done'), null);
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('with nothing caught yet, the lists are empty rather than absent', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const domain = createDomain({ store, now: () => SCHEDULING_NOW });
+      assert.deepEqual(await domain.upcoming(), { due: [], unscheduled: [] });
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('an item caught before this column existed is still listed as to do', async () => {
+  await withDatabase(async (file) => {
+    // A database as an earlier ticket wrote it: `item_` with no state column at
+    // all. Written by hand rather than by an older checkout, because the shape
+    // being checked is exactly the one no code in this tree makes any more.
+    const old = new DatabaseSync(file);
+    old.exec(`
+      CREATE TABLE drop_ (id TEXT PRIMARY KEY, body TEXT NOT NULL, dropped_at TEXT NOT NULL,
+                          input_type TEXT, reply TEXT NOT NULL);
+      CREATE TABLE item_ (id TEXT PRIMARY KEY,
+                          drop_id TEXT NOT NULL REFERENCES drop_(id) ON DELETE CASCADE,
+                          text TEXT NOT NULL, due_at TEXT, caught_at TEXT NOT NULL);
+      INSERT INTO drop_ (id, body, dropped_at, input_type, reply)
+        VALUES ('d1', '下周三交提纲', '${SCHEDULING_NOW}', 'item', '接住了。');
+      INSERT INTO item_ (id, drop_id, text, due_at, caught_at)
+        VALUES ('i1', 'd1', '交提纲', '2026-09-23T09:00:00.000Z', '${SCHEDULING_NOW}');
+    `);
+    old.close();
+
+    const store = openSqliteStore(file);
+    try {
+      const domain = createDomain({ store, now: () => SCHEDULING_NOW });
+      // The column is added with a default rather than left null, because a
+      // rule reads it: an item the file already held must not become invisible.
+      assert.deepEqual(
+        (await domain.upcoming()).due.map((item) => item.text),
+        ['交提纲'],
+        'the item the old file held is on the timeline, not hidden by a null',
+      );
+      assert.equal((await domain.setItemState('i1', 'done'))?.state, 'done');
     } finally {
       await store.close();
     }

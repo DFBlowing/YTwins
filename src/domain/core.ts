@@ -75,6 +75,7 @@ import type {
   DropResult,
   DropSummary,
   Item,
+  ItemState,
   LinkedTerm,
   NamedTerm,
   RecallOptions,
@@ -85,6 +86,7 @@ import type {
   SurfacingResult,
   Term,
   TermLink,
+  Upcoming,
 } from './interface.ts';
 import {
   DEFAULT_LINK_POLICY,
@@ -105,6 +107,7 @@ import {
   safeReply,
   type ReplySituation,
 } from './parent-voice.ts';
+import { upcomingFrom } from './scheduling.ts';
 import type {
   DropStore,
   NewLink,
@@ -235,6 +238,7 @@ function toItem(stored: StoredItem): Item {
     id: stored.id,
     text: stored.text,
     dueAt: stored.dueAt,
+    state: stored.state,
     dropId: stored.dropId,
   };
 }
@@ -1344,6 +1348,25 @@ export function createDomain(options: DomainCoreOptions): Domain {
 
     async listItems(): Promise<readonly Item[]> {
       return (await store.listItems()).map(toItem);
+    },
+
+    async upcoming(): Promise<Upcoming> {
+      // The **whole** list, done items included, and the filtering happens in
+      // `upcomingFrom`: which items a list is made of is a rule about what the
+      // user is asking, and pushing half of it down into SQL would split one
+      // rule across two layers that could then disagree.
+      //
+      // The moment is read once, here, and handed down — the domain owns time
+      // (`createDomain({ now })`), and a read that took the clock twice could
+      // order one list against two moments.
+      return upcomingFrom((await store.listItems()).map(toItem), now());
+    },
+
+    async setItemState(itemId: string, state: ItemState): Promise<Item | null> {
+      const stored = await store.setItemState(itemId, state);
+      // Null is an answer: there is no such item, which is not an error the
+      // caller should have to catch. The same reading `getDrop` takes.
+      return stored === null ? null : toItem(stored);
     },
 
     async listLinks(): Promise<readonly TermLink[]> {

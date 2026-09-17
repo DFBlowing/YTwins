@@ -46,6 +46,26 @@
         -->
         <p class="surfaced surfaced-inline" id="drop-surface" role="status" aria-live="polite" hidden></p>
 
+        <!--
+          排程（08）。打开页面就知道该做什么 —— 这是这一节的全部目的。
+          两列而不是一列：有时间的事项按时间排在前面，没解析出时间的事项
+          留在「待安排」里，不被丢掉、也不被硬塞一个日期。这里没有日历、
+          也不做冲突检测 —— 产品只说接下来有什么，不评价排得开排不开。
+        -->
+        <section class="schedule">
+          <h2 class="section-title">接下来要做的</h2>
+          <p class="schedule-note">
+            有时间的事项由系统自动落到时间上，你不用自己填。没解析出时间的事项留在下面，不会被丢掉。
+          </p>
+          <p class="schedule-problem" id="schedule-problem" role="alert"></p>
+          <ul class="due-list" id="due-list"></ul>
+          <p class="empty" id="due-empty">暂时没有到期的事项。</p>
+
+          <h3 class="schedule-subtitle">待安排</h3>
+          <ul class="due-list due-list-none" id="unscheduled-list"></ul>
+          <p class="empty" id="unscheduled-empty">没有待安排的事项。</p>
+        </section>
+
         <section class="caught">
           <h2 class="section-title">接住了什么</h2>
           <ul class="drop-list" id="drop-list"></ul>
