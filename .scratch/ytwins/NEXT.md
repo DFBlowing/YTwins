@@ -175,7 +175,9 @@ _最后更新：2026-09-17_
   `GET /api/*` 原来回 200 HTML（现在 404）、路由断言名实不符、`CLEAR_ORDER` 是 schema 的第二份知识
   （改成从 `sqlite_master` 读）、两个没人用的 export、一处类型标注；**保留并写明理由**的是 e2e 的预期
   台词写字面量而不 import（import 等于恒真）、预置 provider 跟着素材留在 domain、日期口径两份 ——
-  逐条见 ticket 13 的 `## Comments`。
+  逐条见 ticket 13 的 `## Comments`。**作者验收时又补了一处**（Comments 第 12 条）：演示模式对台词以外的
+  内容读不出任何东西、只回「记下了。」，而页面没有任何提示 —— 现在演示模式下第一幕与第三幕的输入框上方
+  会自述「只认页尾那三句台词」，真实模式下不出现。
 - **01–13 全部完成**；这个 effort 的 ticket 全部落地。
 
 这个仓库的第一个 effort slug 是 `ytwins`（`.scratch/ytwins/`、`docs/ytwins/`）。将来另开 effort 时再取新 slug。

@@ -394,6 +394,10 @@ const demoConfirm = mustFind<HTMLElement>('#demo-confirm');
 const demoConfirmGo = mustFind<HTMLButtonElement>('#demo-confirm-go');
 const demoCancel = mustFind<HTMLButtonElement>('#demo-cancel');
 const demoStatus = mustFind<HTMLParagraphElement>('#demo-status');
+const demoNotices: readonly HTMLParagraphElement[] = [
+  mustFind<HTMLParagraphElement>('#demo-notice'),
+  mustFind<HTMLParagraphElement>('#surface-demo-notice'),
+];
 
 const boundaryLeaves = mustFind<HTMLUListElement>('#boundary-leaves');
 const boundaryLeavesNone = mustFind<HTMLParagraphElement>('#boundary-leaves-none');
@@ -1755,6 +1759,18 @@ async function loadDemo(): Promise<void> {
   if (acts === null) {
     demoBlock.hidden = true;
     return;
+  }
+
+  // And the one thing demo mode has to say about itself **at the boxes**: the
+  // stand-in answers from a table, so anything outside the script reads as
+  // nothing at all — no terms, no items, and only a flat acknowledgement in
+  // reply. That looks like the product being broken rather than like a demo
+  // being a demo, and a note at the foot of the page is too far away to prevent
+  // it. In real mode these stay hidden, because there it is not true.
+  for (const notice of demoNotices) {
+    notice.textContent =
+      '演示模式：这个服务只认页尾「三幕 demo」里那三句台词，自己随手写的内容它读不出词条，也不会有事项。';
+    notice.hidden = false;
   }
 
   const lines: readonly (readonly [string, string])[] = [

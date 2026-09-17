@@ -182,3 +182,23 @@ Standards axis — **three things kept, with the reason written down**:
 - **Date phrasing exists twice** (`preset.ts`'s sentence in an answer, `main.ts`'s `dueLabel` on a row): one is what
   the product says about the user's material, the other is a label on a line, and they are allowed to word the same
   fact differently. The function comment now says which is which.
+
+**12. A gap the author walked into while accepting the ticket, closed the same day (2026-09-17).** Following the
+demo script, the author started the server, dropped 「开学真累」, and saw: **no terms, no items**, and a reply of
+nothing but 「记下了。」; asking 「期末怎么算分」 then answered 「留档里没有和这个问题相关的记录。」
+
+Both are **correct behaviour for demo mode**, but the page said nothing about it, so it read like a broken product:
+
+- The preset stand-in reads from one written-out table; anything outside the script yields nothing at all, and the
+  fake provider's default acknowledgement stands in as the reply;
+- the four preset leads **deliberately do not contain** 「期末怎么算分 / 平时分 / 期末考 60%」 (that is what makes act
+  two's source the fragment act one just dropped), and the author had not dropped act one's line yet — so recall
+  answered 「not found」, correctly.
+
+What was added is **option A**: in demo mode a line appears above the boxes in acts one and three ("this server only
+understands the three lines in the 「三幕 demo」 block at the foot of the page; anything you write yourself yields no
+terms and no items"), and the demo block itself says 「它只认这三句」. In real mode (the product's default) the line is
+not shown, because there it is not true. **No domain behaviour changed**, and the preset provider's own wording was
+left alone (option B stays for another day). The change is two empty notice nodes in `index.html`, the wording filled
+in by `loadDemo` in `main.ts`, and `.demo-notice` in `style.css`. The DOM is not tested automatically (the spec's
+testing decision), so this one is checked by eye.

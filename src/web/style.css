@@ -921,6 +921,18 @@ body {
   color: var(--ink-soft);
 }
 
+/* What demo mode has to say about itself, right above the boxes it applies to.
+   Drawn like a note rather than like a warning — nothing is wrong, it is a
+   scripted stand-in — and only ever rendered where a demo is running. */
+.demo-notice {
+  margin: 0 0 1rem;
+  padding: 0.6rem 0.85rem;
+  border-left: 3px solid var(--accent);
+  background: #fff;
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+}
+
 /* The three-act demo's own block (13). Shown only where the server was started
    in demo mode, and set apart from the acts themselves: it is not part of the
    product the user drops things into — it is the script this machine is running,

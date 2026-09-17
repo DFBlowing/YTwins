@@ -36,6 +36,12 @@ the `data/ytwins.sqlite` you normally use, so the reset button empties the forme
 cannot touch what you have really dropped. The startup log says which file is in use.
 Set `YTwins_DB` to point somewhere else; naming a file wins.
 
+**The page says this about itself**: in demo mode, a line above the boxes in acts one and
+three says that this server only understands the three lines at the foot of the page, and
+the demo block repeats it — because anything outside the script yields **no terms and no
+items**, and only a flat acknowledgement in reply, which looks like a broken product
+rather than like a demo. In real mode (the default) that line is not shown.
+
 Before presenting, press **Start the demo over** at the foot of the page and confirm
 (two steps, like deletion). The library then holds only the preset leads: two fragments
 about the exam, two about not sleeping. **This step is required** — the threshold is

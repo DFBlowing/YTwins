@@ -26,6 +26,14 @@
       <section class="act" data-act-panel="drop">
         <p class="lede">把任何没格式的碎片丢进来。不用分类，不用填时间。</p>
 
+        <!--
+          演示模式的自述（13 的补丁）。替身只从一张写死的表里读，台词以外的内容它
+          读不出任何词条、也没有事项，回应只剩一句最平淡的「记下了。」—— 那看起来
+          像产品坏了，而不是像一场演示。所以这一句必须紧挨着输入框，不能只写在页尾
+          的 demo 一节里。真实模式（默认）下它不出现。
+        -->
+        <p class="demo-notice" id="demo-notice" hidden></p>
+
         <form class="drop-form" id="drop-form">
           <textarea
             id="drop-input"
@@ -179,6 +187,8 @@
           <span class="surface-again-hint" id="surface-again-hint">先在「丢」里丢一句。</span>
         </div>
 
+        <p class="demo-notice" id="surface-demo-notice" hidden></p>
+
         <form class="drop-form" id="surface-form">
           <textarea
             id="surface-input"
@@ -220,6 +230,7 @@
         <h2 class="section-title">三幕 demo</h2>
         <p class="demo-note">
           这台服务以演示模式运行：下面三句就是三幕的台词，由服务端从预置素材里读出来。第一幕丢第一句，第二幕问第二句，第三幕丢第三句。
+          <strong>它只认这三句</strong> —— 自己随手写的内容它读不出任何词条，也不会给出事项。
         </p>
         <ol class="demo-acts" id="demo-acts"></ol>
         <p class="demo-warning">
