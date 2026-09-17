@@ -3968,12 +3968,19 @@ await check('a deletion survives a restart', async () => {
   }
 });
 
-await check('a database written before the schema change loses no words when a drop goes', async () => {
+await check('a database written before the schema change migrates with everything intact', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'ytwins-domain-'));
   const file = join(dir, 'ytwins.sqlite');
   try {
-    // A file from tickets 01–08: `term_.origin_drop_id` still **cascades**, which
-    // is how the schema shipped until ticket 09 found out what that costs.
+    // A **complete** file from tickets 01–08, with material already accumulated in
+    // it: `term_.origin_drop_id` still cascades, and matters, conclusions and
+    // surfacings already hang off those terms.
+    //
+    // Complete on purpose. An earlier version of this check built only the tables
+    // ticket 09 touches, so the migration's real risk went untested: it **drops and
+    // rebuilds `term_`**, and the rows that reference a term from other tables are
+    // precisely what a rebuild can lose. A user with a used database is in that
+    // state, not in the empty one.
     const old = new DatabaseSync(file);
     old.exec('PRAGMA foreign_keys = ON');
     old.exec(`
@@ -3990,28 +3997,111 @@ await check('a database written before the schema change loses no words when a d
       CREATE TABLE link_ (id TEXT PRIMARY KEY, a_term_id TEXT NOT NULL REFERENCES term_(id) ON DELETE CASCADE,
         b_term_id TEXT NOT NULL REFERENCES term_(id) ON DELETE CASCADE, kind TEXT NOT NULL,
         strength REAL NOT NULL, reason TEXT NOT NULL, UNIQUE (a_term_id, b_term_id));
+      CREATE TABLE matter_ (id TEXT PRIMARY KEY,
+        anchor_term_id TEXT NOT NULL REFERENCES term_(id) ON DELETE CASCADE,
+        first_at TEXT NOT NULL, last_at TEXT NOT NULL, raised_count INTEGER NOT NULL);
+      CREATE TABLE matter_term_ (matter_id TEXT NOT NULL REFERENCES matter_(id) ON DELETE CASCADE,
+        term_id TEXT NOT NULL REFERENCES term_(id) ON DELETE CASCADE, position INTEGER NOT NULL,
+        PRIMARY KEY (matter_id, term_id));
+      CREATE TABLE matter_drop_ (drop_id TEXT PRIMARY KEY REFERENCES drop_(id) ON DELETE CASCADE,
+        matter_id TEXT NOT NULL REFERENCES matter_(id) ON DELETE CASCADE,
+        anchor_term_id TEXT REFERENCES term_(id) ON DELETE SET NULL, at TEXT NOT NULL);
+      CREATE TABLE conclusion_ (id TEXT PRIMARY KEY,
+        matter_id TEXT NOT NULL REFERENCES matter_(id) ON DELETE CASCADE,
+        claim TEXT, text TEXT NOT NULL, kind TEXT NOT NULL, tier TEXT, relation TEXT NOT NULL,
+        supersedes TEXT REFERENCES conclusion_(id) ON DELETE SET NULL, created_at TEXT NOT NULL,
+        mentions INTEGER NOT NULL, span_days INTEGER NOT NULL, avg_strength REAL NOT NULL);
+      CREATE TABLE conclusion_support_ (conclusion_id TEXT NOT NULL REFERENCES conclusion_(id) ON DELETE CASCADE,
+        term_id TEXT NOT NULL REFERENCES term_(id) ON DELETE CASCADE, position INTEGER NOT NULL,
+        PRIMARY KEY (conclusion_id, term_id));
+      CREATE TABLE surfacing_ (id TEXT PRIMARY KEY,
+        conclusion_id TEXT NOT NULL REFERENCES conclusion_(id) ON DELETE CASCADE, surfaced_at TEXT NOT NULL);
+      CREATE TABLE settle_state_ (id INTEGER PRIMARY KEY CHECK (id = 1),
+        drops_since INTEGER NOT NULL, look_now_next INTEGER NOT NULL);
+    `);
+
+    // One matter raised twice, anchored on 「好烦」 — a word **both** fragments say,
+    // so it survives the deletion and the matter keeps standing. The interesting
+    // part is not the deletion here but whether the rebuild carried it all over.
+    old.exec(`
+      INSERT INTO drop_ (id, body, dropped_at, input_type, reply, anchor_term_id)
+        VALUES ('d1', '今天又在改提纲，好烦', '2026-09-01T00:00:00.000Z', 'emotion', '记下了。', NULL),
+               ('d2', '平时分那 40% 到底怎么算，好烦', '2026-09-02T00:00:00.000Z', 'emotion', '记下了。', NULL);
+      INSERT INTO term_ (id, text, origin_drop_id, first_seen_at, vector)
+        VALUES ('t_bother', '好烦', 'd1', '2026-09-01T00:00:00.000Z', NULL),
+               ('t_outline', '改提纲', 'd1', '2026-09-01T00:00:00.000Z', NULL),
+               ('t_percent', '平时分 40%', 'd2', '2026-09-02T00:00:00.000Z', NULL);
+      INSERT INTO term_in_drop_ (drop_id, term_id, said_at)
+        VALUES ('d1', 't_bother', '2026-09-01T00:00:00.000Z'),
+               ('d1', 't_outline', '2026-09-01T00:00:00.000Z'),
+               ('d2', 't_bother', '2026-09-02T00:00:00.000Z'),
+               ('d2', 't_percent', '2026-09-02T00:00:00.000Z');
+      INSERT INTO link_ (id, a_term_id, b_term_id, kind, strength, reason)
+        VALUES ('l1', 't_bother', 't_outline', 'same-drop', 1.0, '同一次投递里一起说的');
+      INSERT INTO matter_ (id, anchor_term_id, first_at, last_at, raised_count)
+        VALUES ('m1', 't_bother', '2026-09-01T00:00:00.000Z', '2026-09-02T00:00:00.000Z', 2);
+      INSERT INTO matter_term_ (matter_id, term_id, position)
+        VALUES ('m1', 't_bother', 0), ('m1', 't_outline', 1), ('m1', 't_percent', 2);
+      INSERT INTO matter_drop_ (drop_id, matter_id, anchor_term_id, at)
+        VALUES ('d1', 'm1', 't_bother', '2026-09-01T00:00:00.000Z'),
+               ('d2', 'm1', 't_bother', '2026-09-02T00:00:00.000Z');
+      INSERT INTO conclusion_ (id, matter_id, claim, text, kind, tier, relation, supersedes,
+        created_at, mentions, span_days, avg_strength)
+        VALUES ('c1', 'm1', '你最近好像有几件事堆在一起',
+                '我不太确定：你最近好像有几件事堆在一起。', 'claim', 'weak', 'first', NULL,
+                '2026-09-02T00:00:00.000Z', 2, 1, 1.0);
+      INSERT INTO conclusion_support_ (conclusion_id, term_id, position)
+        VALUES ('c1', 't_bother', 0), ('c1', 't_outline', 1), ('c1', 't_percent', 2);
+      INSERT INTO surfacing_ (id, conclusion_id, surfaced_at)
+        VALUES ('s1', 'c1', '2026-09-02T01:00:00.000Z');
+      INSERT INTO settle_state_ (id, drops_since, look_now_next) VALUES (1, 0, 1);
     `);
     old.close();
 
     const store = openSqliteStore(file);
     try {
-      const provider = mattersOnly([...EXAM_READINGS, PASSER_BY_READING], EXAM_SCRIPT);
-      const domain = createDomain({ store, provider });
-      const ids: string[] = [];
-      for (const [body] of EXAM_READINGS) ids.push((await domain.drop(body)).id);
-      await readConclusions(domain, 1);
+      // Everything that was in the file is still in it — the rebuild moved the
+      // terms without disturbing what pointed at them.
+      const terms = (await store.listTerms()).map((term) => term.text);
+      assert.deepEqual(terms.sort(), ['好烦', '改提纲', '平时分 40%'].sort(), 'every term survived');
 
-      const first = ids[0];
-      assert.ok(first !== undefined);
-      await domain.deleteDrop(first, 'cascade');
+      const matters = await store.listMatters();
+      assert.equal(matters.length, 1, 'the matter survived');
+      assert.deepEqual(
+        matters[0]?.supportTermIds.length,
+        3,
+        'with its whole support — nothing was orphaned by the rebuild',
+      );
+      assert.equal(matters[0]?.raisedCount, 2, 'and its count');
 
-      // The word the deleted fragment first said is still said by the two that
-      // remain, so it has to survive. Under the old schema the cascade on
-      // `origin_drop_id` took it, and those two fragments silently lost something
-      // they had said — which is the whole reason the reference was dropped.
+      const conclusions = await store.listConclusions();
+      assert.equal(conclusions.length, 1, 'the conclusion survived');
+      assert.equal(conclusions[0]?.supportTermIds.length, 3, 'still citing all three words');
+      assert.equal((await store.listSurfacings()).length, 1, 'and the record of it being shown');
+
+      // The old cascading reference is gone, and nothing it was holding up came
+      // loose in the process. `foreign_key_check` is the assertion the rebuild is
+      // actually about: a migration that left a dangling reference would still
+      // pass every read above, because a dangling reference reads as a missing row.
+      const checker = new DatabaseSync(file);
+      const violations = checker.prepare('PRAGMA foreign_key_check').all();
+      const termForeignKeys = checker.prepare('PRAGMA foreign_key_list(term_)').all() as unknown as {
+        readonly from: string;
+      }[];
+      checker.close();
+      assert.deepEqual(violations, [], 'nothing dangles after the rebuild');
+      assert.ok(
+        !termForeignKeys.some((key) => key.from === 'origin_drop_id'),
+        'and a term no longer cascades away with the drop that first said it',
+      );
+
+      // And now the behaviour the migration is for: deleting the fragment that
+      // first said 「好烦」 must not take the word from the fragment still saying it.
+      const domain = createDomain({ store });
+      await domain.deleteDrop('d1', 'cascade');
       const said = (await domain.listDrops()).flatMap((drop) => drop.terms.map((term) => term.text));
-      assert.ok(said.includes('好烦'), 'a word the remaining fragments still say did not disappear');
-      assert.ok(!said.includes('期末怎么算分'), 'and a word only the deleted one said did go');
+      assert.ok(said.includes('好烦'), 'a word the remaining fragment still says did not disappear');
+      assert.ok(!said.includes('改提纲'), 'and a word only the deleted one said did go');
     } finally {
       await store.close();
     }
