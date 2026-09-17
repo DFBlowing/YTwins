@@ -280,6 +280,20 @@ reply is"), not storage-shaped ones (no tables, no id assembly, no SQL). At mini
 - **The conclusion chain is append-only in effect**: marking "not true" records an overturning; the old conclusion is
   neither overwritten nor deleted (consistent with "raw text kept in full + recallable later"), so old conclusions
   require versions and a superseded relation.
+  > **Corrected 2026-09-17 (when 10 landed)**: "records an overturning" lands as **appending a record to the chain**
+  > (`kind: 'correction'`, `relation: 'overturn'`, `supersedes` pointing at the rejected one). The text of that record is
+  > **a fact written by code** (「你标了这条不对。」) with no model involved: the user has just said the reading was
+  > wrong, and having a model phrase a "corrected version" would be the product using that rejection to invent another
+  > view of the user — one it does not hold. The record **also reaches the corpus layer**: a matter that was rejected is
+  > discounted by `overturnedOverlapFactor` (0.3 by default) when attachment measures overlap, so it no longer counts as
+  > "the same thing", and anything said about it afterwards steps one band softer (`overturnedBandDrop`, 1 by default) —
+  > what is lowered is the **classification**, never the fact. Not one of the three numbers is touched; the step itself
+  > is stored with that conclusion as a **fourth input** (`softened`) and named by the page under "why did it say that",
+  > so the band and the numbers beside it cannot contradict each other.
+  > "Add a sentence of your own" is a **drop** (wording stored verbatim, terms extracted, taking part in settling) and it
+  > is **pinned** to the matter that conclusion came from: writing it beside the conclusion is the user stating "this is
+  > about that" more clearly than any overlap could. Full account in [`issues/10`](./issues/10-revision-overturn-and-append.en.md)
+  > under `## Comments`.
 - **Surfacing timing and cooldown**: attempted only on an emotional drop or a user-initiated question; the same topic
   cools down for 7 days; at most one item per turn. The engineering definition of **topic** is "semantic overlap
   between the supporting term sets" — overlap above an internal ratio counts as the same topic.

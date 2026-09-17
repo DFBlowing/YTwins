@@ -360,9 +360,8 @@ export function createHandler(domain: Domain) {
 
     // The **portrait**, which is also the **conclusion chain**: the conclusions
     // themselves, each with the terms that support it and how it stands to the
-    // one before it. Read-only by construction — there is no write endpoint
-    // here, because settling needs no participation from the user. The two
-    // things the user may do to a conclusion arrive with ticket 10.
+    // one before it. Read-only: settling needs no participation from the user,
+    // and the only two things that may be written are the revision routes below.
     if (request.method === 'GET' && url === '/api/conclusions') {
       try {
         const conclusions = await domain.listConclusions();
@@ -371,6 +370,63 @@ export function createHandler(domain: Domain) {
         sendJson(response, 500, { error: '读取失败' });
       }
       return;
+    }
+
+    // The two light things the user may do to a conclusion (10), and the only
+    // writes the portrait has ever had. Both are named after what the user **did**
+    // rather than after what the product stores: `wrong` is the tap on 「不对」,
+    // `append` is a sentence written beside the record.
+    //
+    // Anything else under this path is not an operation and falls through to the
+    // 405 at the bottom — which is what makes "there is no rating, no like and no
+    // bulk answer" a fact about the server rather than a promise about the page.
+    // The two operations take **one** conclusion, named in the path: there is no
+    // request shape here that carries a score, or a list.
+    if (request.method === 'POST' && url.startsWith('/api/conclusions/')) {
+      try {
+        const [rawId = '', action = ''] = url.slice('/api/conclusions/'.length).split('/');
+        const conclusionId = decodeURIComponent(rawId);
+        if (conclusionId.length === 0) {
+          sendJson(response, 400, { error: '没说是哪一条小结论' });
+          return;
+        }
+
+        if (action === 'wrong') {
+          // No body: there is nothing to carry. The act is the whole message, and
+          // a request that could name a reason would be the beginning of a
+          // feedback form.
+          const conclusion = await domain.markConclusionWrong(conclusionId);
+          // Not found is a 404 rather than a 200 with null: the client asked about
+          // a specific record, so there is no honest page state for "it is gone".
+          if (conclusion === null) {
+            sendJson(response, 404, { error: '没有这条小结论' });
+            return;
+          }
+          sendJson(response, 200, { conclusion });
+          return;
+        }
+
+        if (action === 'append') {
+          const parsed = JSON.parse(await readBody(request)) as { body?: unknown };
+          const body = typeof parsed.body === 'string' ? parsed.body : '';
+          if (body.trim().length === 0) {
+            sendJson(response, 400, { error: '补充内容是空的' });
+            return;
+          }
+          const addition = await domain.appendToConclusion(conclusionId, body);
+          if (addition === null) {
+            sendJson(response, 404, { error: '没有这条小结论' });
+            return;
+          }
+          sendJson(response, 200, { addition });
+          return;
+        }
+      } catch (error) {
+        sendJson(response, 500, {
+          error: error instanceof Error ? error.message : '改不动这条小结论',
+        });
+        return;
+      }
     }
 
     if (request.method === 'GET') {

@@ -33,7 +33,7 @@
  * @module domain/conclusions
  */
 
-import type { ConclusionTier } from './interface.ts';
+import { CONCLUSION_TIERS, type ConclusionTier } from './interface.ts';
 
 /**
  * The dials that decide when a conclusion is assembled, and how firmly it speaks.
@@ -118,6 +118,31 @@ export interface ConclusionPolicy {
    */
   readonly weightSharedBySpread: boolean;
   /**
+   * What a matter the user has rejected is still worth as "the same thing".
+   *
+   * A fragment that shares a word with a matter the user already called wrong is
+   * not evidence that the fragment is about it — the user has said the reading
+   * was off, so the overlap is discounted before it is compared with
+   * `overlapRatio`. At the default the discount is decisive: overlap tops out at
+   * 1, so a rejected matter can only be added to by a note the user writes beside
+   * one of its conclusions, which is an attachment the user made rather than one
+   * the product inferred.
+   *
+   * This is the prototype's own number and its own reading ("标不对要走到语料层"):
+   * what the rejection lowers is the **classification**, never the fact — the
+   * terms were still said together, and the links between them are untouched.
+   */
+  readonly overturnedOverlapFactor: number;
+  /**
+   * How many bands softer a matter speaks once the user has rejected a reading.
+   *
+   * The second half of the same reading: an inferred overlap discounted is a
+   * matter that stops attracting look-alikes, and a band stepped down is what the
+   * product says if anything is said about it afterwards. A step rather than a
+   * factor, because bands are ordinal and there are three of them.
+   */
+  readonly overturnedBandDrop: number;
+  /**
    * The wording bands: how many terms support it, how long it has spanned, and
    * how tightly those terms connect to the feeling it is about.
    *
@@ -149,6 +174,8 @@ export const DEFAULT_CONCLUSION_POLICY: ConclusionPolicy = {
   claimFloor: 3,
   overlapRatio: 0.5,
   weightSharedBySpread: true,
+  overturnedOverlapFactor: 0.3,
+  overturnedBandDrop: 1,
   mediumTerms: 3,
   mediumSpanDays: 3,
   strongTerms: 6,
@@ -269,6 +296,41 @@ export function tierOf(
 export function mayClaim(supportCount: number, policy: ConclusionPolicy): boolean {
   return supportCount >= policy.claimFloor;
 }
+
+/**
+ * The same band, hedged one step further.
+ *
+ * Used for a matter the user has rejected: nothing about the evidence changed,
+ * but the product has been told it read this one wrong, and speaking as firmly
+ * as before would be the product ignoring what it was just told. `weak` is the
+ * floor — there is no band below the one that says outright that it is unsure.
+ *
+ * @param tier - the band the numbers earned.
+ * @param steps - how many bands to soften; zero is the band unchanged.
+ * @returns the band to write the sentence in.
+ */
+export function softerTier(tier: ConclusionTier, steps: number): ConclusionTier {
+  // The order is `CONCLUSION_TIERS`, not a second list: the bands are one set,
+  // and the store reads the same one back so that a relation it cannot name is
+  // never invented.
+  const index = CONCLUSION_TIERS.indexOf(tier);
+  // A value this build does not know is handed back untouched rather than
+  // turned into the weakest band, which would be a reading nobody earned — the
+  // same choice the store makes when it cannot name a stored value.
+  if (index === -1) return tier;
+  return CONCLUSION_TIERS[Math.max(0, index - Math.max(0, steps))] ?? tier;
+}
+
+/**
+ * The line code writes into the chain when the user marks a conclusion wrong.
+ *
+ * A fact, so it is stated plainly: the user did this, and there is nothing for
+ * the product to hedge. It names the act and not the sentence, because the
+ * record it is written on already carries the conclusion it supersedes — an
+ * interface that quotes it again would be the same fact stored twice, and the
+ * two copies could only ever come apart.
+ */
+export const CORRECTION_LINE = '你标了这条不对。';
 
 /**
  * A sentence with its closing punctuation taken off.

@@ -62,18 +62,31 @@
  * an old one into "withdrawn" would be the product editing its own history to look
  * better.
  *
+ * Ticket 10 gives the user the two light things they may do to a conclusion, and
+ * both are shaped by the same promise the deletion above was: the portrait is a
+ * history, so it grows and is never rewritten. Marking a conclusion wrong adds a
+ * record of the correction beside it — code's own plain line, no model asked,
+ * nothing taken back — and reaches into the material behind it, because a matter
+ * the user has rejected must stop pulling in fragments that merely look like it
+ * and must speak one band softer if it speaks again. Writing a sentence of one's
+ * own beside a conclusion is the other half, and it goes down the ordinary drop
+ * path with one thing said in advance: it belongs to **that** conclusion's matter,
+ * because the user put it there.
+ *
  * @module domain/core
  */
 
 import type { AiProvider, ExtractResult } from './ai-provider.ts';
 import {
   CONCLUSION_INSTRUCTIONS,
+  CORRECTION_LINE,
   DEFAULT_CONCLUSION_POLICY,
   bareSentence,
   checkConclusion,
   frameFor,
   mayClaim,
   overlapOf,
+  softerTier,
   spanDays,
   spreadWeight,
   tierOf,
@@ -81,6 +94,7 @@ import {
 } from './conclusions.ts';
 import type {
   Conclusion,
+  ConclusionAddition,
   ConclusionKind,
   ConclusionRef,
   ConclusionRelation,
@@ -307,6 +321,26 @@ function concludedSupport(
 }
 
 /**
+ * Which matters the user has rejected a reading of.
+ *
+ * Derived from the chain rather than kept as a flag on the matter, because it is
+ * the same fact: a matter stands rejected when one of its conclusions was marked
+ * wrong, and the `correction` row **is** that record. A flag would be a second
+ * copy of it, and one that could not follow a kept judgement to another matter
+ * the way ticket 09's `original-only` moves them.
+ *
+ * @param conclusions - every stored conclusion.
+ * @returns the ids of the matters a correction was recorded against.
+ */
+function overturnedMatters(conclusions: readonly StoredConclusion[]): ReadonlySet<string> {
+  const rejected = new Set<string>();
+  for (const conclusion of conclusions) {
+    if (conclusion.kind === 'correction') rejected.add(conclusion.matterId);
+  }
+  return rejected;
+}
+
+/**
  * How tightly a matter's support connects to the feeling it is about.
  *
  * The strong band's third gate, and the only one that looks at the links: a
@@ -458,6 +492,35 @@ export function createDomain(options: DomainCoreOptions): Domain {
   function queueLook(step: () => Promise<void>): Promise<void> {
     lookQueue = lookQueue.then(step).catch(() => {});
     return lookQueue;
+  }
+
+  /**
+   * Queue one write to the chain behind whatever is already settling, and hand
+   * its outcome — failure included — back to the caller.
+   *
+   * The same queue `queueLook` uses, and for the reason that queue exists: a
+   * correction writes to the portrait while a look may be mid-composition on
+   * material it read a moment ago, and the two must not interleave — a sentence
+   * decided against a chain that has since been corrected would be filed under
+   * the wrong predecessor.
+   *
+   * What differs from `queueLook` is the promise the caller gets. A look is
+   * background work and swallows its failure; a tap is not, and a write the user
+   * asked for that could not be made must reach them as a failure rather than as
+   * "there is no such conclusion" — which is what swallowing it here would report.
+   *
+   * @param step - the write to run.
+   * @returns whatever the step returned, or its rejection.
+   */
+  async function queueRevision<T>(step: () => Promise<T>): Promise<T> {
+    const queued = lookQueue.then(step);
+    // The queue itself must never carry a rejection: everything behind this one
+    // would be dropped with it.
+    lookQueue = queued.then(
+      () => {},
+      () => {},
+    );
+    return queued;
   }
 
   /**
@@ -777,8 +840,15 @@ export function createDomain(options: DomainCoreOptions): Domain {
    * split or merge matters the user's portrait was built from, and the promise
    * is that changing a value affects what happens next.
    *
-   * Two ways a drop joins the accumulation, and one way it does not:
+   * Two ways a drop joins the accumulation, one way it is put there, and one way
+   * it does not:
    *
+   *  - It was **written beside a conclusion** (ticket 10), so the user has
+   *    already said which matter it belongs to. That is not re-derived: overlap
+   *    is what the product guesses from words, and here the user has stated it
+   *    outright — all the more so on a matter they have rejected, where the guess
+   *    is deliberately damped and a note about it would otherwise land somewhere
+   *    it was not about.
    *  - It covers enough of a matter to be about it (`overlapRatio`, measured
    *    against the smaller side, with shared terms weighted by how widely they
    *    are already spread — see `conclusions.ts`).
@@ -787,6 +857,12 @@ export function createDomain(options: DomainCoreOptions): Domain {
    *  - It covers nothing and carries neither — an observation, a fact, a plan
    *    with no feeling in it. Its terms are kept and it accumulates into
    *    nothing, because there is no "about" for a mark to attach to.
+   *
+   * A matter the user has rejected takes part in the measurement at a discount
+   * (`overturnedOverlapFactor`): they have said the reading was wrong, so sharing
+   * a word with it is worth less as evidence that this fragment is about it. The
+   * discount falls on the **classification only** — which terms were said
+   * together, and how strongly they link, is a fact and stays untouched.
    *
    * Never throws: a drop that could not be attached costs an accumulation, never
    * the drop, the terms or the links, all of which were written before this ran.
@@ -821,13 +897,34 @@ export function createDomain(options: DomainCoreOptions): Domain {
       const anchor = said.find((term) => term.id === anchorTermId) ?? null;
       const saidIds = said.map((term) => term.id);
 
+      // Where the user put it outranks what the product could infer. The matter
+      // may be gone — a note outlives the thing it was written beside — and a pin
+      // that no longer resolves simply leaves the drop to the ordinary rules.
+      const pinned = drop.pinnedMatterId;
+      if (pinned !== null && matters.some((matter) => matter.id === pinned)) {
+        await store.growMatter({
+          matterId: pinned,
+          dropId: drop.id,
+          anchorTermId: anchor?.id ?? null,
+          at: drop.droppedAt,
+          termIds: saidIds,
+        });
+        // Counted like any other fragment that joined: the pile the backstop
+        // counts is the one a look will judge.
+        await store.noteAttachment();
+        return;
+      }
+
       // What sharing a wording is worth, read the one way both rules read it —
       // see `spreadWeigher`.
       const weight = spreadWeigher(matters);
+      const rejected = overturnedMatters(await store.listConclusions());
 
       let best: { matterId: string; value: number } | null = null;
       for (const matter of matters) {
-        const value = overlapOf(saidIds, matter.supportTermIds, weight).value;
+        const measured = overlapOf(saidIds, matter.supportTermIds, weight).value;
+        const value =
+          measured * (rejected.has(matter.id) ? conclusionPolicy.overturnedOverlapFactor : 1);
         if (best === null || value > best.value) best = { matterId: matter.id, value };
       }
 
@@ -923,6 +1020,10 @@ export function createDomain(options: DomainCoreOptions): Domain {
     const terms = new Map((await store.listTerms()).map((term) => [term.id, term]));
     const conclusions = await store.listConclusions();
     const concluded = concludedSupport(conclusions);
+    // Read once for the whole look, the same way the wordings are: whether a
+    // matter has been rejected is a fact about the chain, and a look that asked
+    // again per matter could answer the same question two ways.
+    const rejected = overturnedMatters(conclusions);
     const latest = new Map<string, StoredConclusion>();
     for (const conclusion of conclusions) latest.set(conclusion.matterId, conclusion);
 
@@ -969,6 +1070,9 @@ export function createDomain(options: DomainCoreOptions): Domain {
         let kind: ConclusionKind;
         let tier: ConclusionTier | null;
         let claim: string | null;
+        // Whether a band was written below what the numbers earned. False for a
+        // catch and a correction, which have no band to soften.
+        let softened = false;
 
         if (!mayClaim(matter.supportTermIds.length, conclusionPolicy)) {
           // Too little to say anything about a pattern: catch the newest feeling
@@ -991,7 +1095,18 @@ export function createDomain(options: DomainCoreOptions): Domain {
               ? undefined
               : terms.get(newest.anchorTermId);
           const feeling = newestTerm?.text ?? anchorTerm.text;
-          const band = tierOf(matter.supportTermIds.length, days, strength, conclusionPolicy);
+          // One band softer on a matter the user has rejected. The numbers are
+          // **not** adjusted: they are what they were, and a band read off them
+          // that then steps down is explained by saying so — which is why the
+          // step is written down beside them rather than left to be inferred from
+          // a chain that may since have changed. The step applies only where it
+          // changes the answer: a claim already at the weakest band is not
+          // "softened", because nothing was.
+          const earned = tierOf(matter.supportTermIds.length, days, strength, conclusionPolicy);
+          const band = softerTier(
+            earned,
+            rejected.has(matter.id) ? conclusionPolicy.overturnedBandDrop : 0,
+          );
           const sentence = await composeClaim(feeling, supportTexts, band);
           // Silence rather than a worse sentence. The crossing stays pending, so
           // the next look tries again.
@@ -999,6 +1114,7 @@ export function createDomain(options: DomainCoreOptions): Domain {
           text = frameFor(band, sentence);
           kind = 'claim';
           tier = band;
+          softened = band !== earned;
           // The sentence is kept beside the framed line, so the moment the product
           // speaks first can write its own opening in front of it rather than
           // reading one back out of a string.
@@ -1011,6 +1127,7 @@ export function createDomain(options: DomainCoreOptions): Domain {
           text,
           kind,
           tier,
+          softened,
           relation,
           supersedes: previous?.id ?? null,
           createdAt: at,
@@ -1228,6 +1345,64 @@ export function createDomain(options: DomainCoreOptions): Domain {
       await store.listItemsForDrop(dropId),
       await store.listTermsForDrop(dropId),
     );
+  }
+
+  /**
+   * The chain as the interface reports it: every conclusion, with its evidence
+   * named and its relations filled in both ways.
+   *
+   * One function rather than the shape written out wherever a conclusion is
+   * handed back, because two callers ask the same question — the page reading the
+   * portrait, and `markConclusionWrong` handing back the record it just wrote —
+   * and a second spelling of "how a conclusion reads" would drift from the first.
+   *
+   * `supersededBy` is derived rather than stored, because a conclusion cannot know
+   * it will be revised. A conclusion may be superseded more than once — carried on
+   * from, and then rejected — and the forward pointer names the **newest** thing
+   * that replaced it, because the question it answers is where that conclusion
+   * stands now. The full history is not lost: every entry still names the one it
+   * came from, so the chain can be walked backwards from the end.
+   *
+   * @returns every conclusion, oldest first.
+   */
+  async function conclusionViews(): Promise<readonly Conclusion[]> {
+    // Read the terms once and share the map: what a conclusion needs from a term
+    // is its wording, and one read of the whole list beats a lookup per supporting
+    // term — the same trade `listLinks` makes.
+    const terms = new Map((await store.listTerms()).map((term) => [term.id, term]));
+    const stored = await store.listConclusions();
+    const byId = new Map(stored.map((conclusion) => [conclusion.id, conclusion]));
+
+    const revisedBy = new Map<string, string>();
+    for (const conclusion of stored) {
+      if (conclusion.supersedes !== null) revisedBy.set(conclusion.supersedes, conclusion.id);
+    }
+    const ref = (id: string | null | undefined): ConclusionRef | null => {
+      const found = id === null || id === undefined ? undefined : byId.get(id);
+      return found === undefined ? null : { id: found.id, text: found.text };
+    };
+
+    return stored.map((conclusion) => ({
+      id: conclusion.id,
+      text: conclusion.text,
+      kind: conclusion.kind,
+      tier: conclusion.tier,
+      softened: conclusion.softened,
+      relation: conclusion.relation,
+      supersedes: ref(conclusion.supersedes),
+      supersededBy: ref(revisedBy.get(conclusion.id)),
+      createdAt: conclusion.createdAt,
+      mentions: conclusion.mentions,
+      spanDays: conclusion.spanDays,
+      averageStrength: conclusion.averageStrength,
+      // A supporting term the store can no longer name is left out rather than
+      // shown as a blank: a conclusion listed with a nameless prop would be a
+      // judgement with evidence the user cannot read.
+      support: conclusion.supportTermIds
+        .map((termId) => terms.get(termId))
+        .filter((term): term is StoredTerm => term !== undefined)
+        .map(toNamedTerm),
+    }));
   }
 
   /**
@@ -1482,53 +1657,73 @@ export function createDomain(options: DomainCoreOptions): Domain {
     });
   }
 
+  /**
+   * Record one drop, along with whatever the user has already said about where
+   * it belongs.
+   *
+   * Everything that happens to a drop other than being read: the row, the line it
+   * is answered with, the quiet window it arms, and the two pieces of background
+   * work (reading it, and phrasing the reply). Pulled out of `drop` for one
+   * caller — a sentence written beside a conclusion (ticket 10) — because the
+   * whole point of that sentence is that it is **a drop like any other**, and a
+   * second path into the store would be a second set of guarantees to keep.
+   *
+   * @param body - the raw text the user typed. Stored verbatim.
+   * @param pinnedMatterId - the matter the user wrote it beside, or null for a
+   *   drop typed at the top, which the ordinary attachment rules place.
+   * @returns what this drop caught, and the reply to show the user.
+   */
+  async function recordDrop(body: string, pinnedMatterId: string | null): Promise<DropResult> {
+    // What this drop asks of its reply, read once and used for two things:
+    // the line to answer with now, and what the provider is told later.
+    const situation = readSituation(body);
+    const safe = safeReply(situation);
+
+    // Record first, with the line the user is owed. The faithful original and
+    // an answer to it are what make the drop a success; both are code's own,
+    // and neither waits on anyone.
+    // The moment is taken once, at the drop, and used for everything that drop
+    // causes: the row it is stored as and — through the drop it belongs to —
+    // where its terms and its matter land in time. Reading the clock again later
+    // would let a slow reading move a fragment's moment, and a span is a number
+    // this product decides on.
+    const at = now();
+    const stored = await store.appendDrop(body, safe, at, pinnedMatterId);
+
+    // The quiet window is armed before anything else runs. It is a fact about
+    // *this drop arriving* rather than about what was read out of it, so it may
+    // not wait on a provider; what the drop added to the accumulation is counted
+    // later, once it has actually been attached.
+    armQuietWindow();
+
+    // Read the drop in the background. This is the decision the whole product
+    // is shaped around: a drop returns in the time it takes to write one row,
+    // so a provider that is slow, down, or still thinking cannot delay the
+    // user.
+    //
+    // The items this produces are therefore *not* in the return value — they
+    // do not exist yet. The caller finds them by reading the drop again, and
+    // so does a page refresh, which is why both paths are the same code.
+    //
+    // `extractInto` never rejects, so this floating promise cannot become an
+    // unhandled rejection — including when the provider throws synchronously,
+    // which is why the call happens inside an async function rather than as a
+    // bare `provider.extract(...)` guarded by `.catch(...)`. Awaiting inside
+    // `extractInto` also means the reply is composed only after the drop row
+    // exists, so it cannot race the store.
+    void extractInto(stored);
+
+    // Compose the styled reply to what the user just said. Like extraction, it
+    // does not gate the drop: it replaces the line the drop was caught with,
+    // and only if it passes the parent-voice checks.
+    void replyInto(stored, situation);
+
+    return { body: stored.body, reply: stored.reply ?? safe, id: stored.id };
+  }
+
   return {
     async drop(body: string): Promise<DropResult> {
-      // What this drop asks of its reply, read once and used for two things:
-      // the line to answer with now, and what the provider is told later.
-      const situation = readSituation(body);
-      const safe = safeReply(situation);
-
-      // Record first, with the line the user is owed. The faithful original and
-      // an answer to it are what make the drop a success; both are code's own,
-      // and neither waits on anyone.
-      // The moment is taken once, at the drop, and used for everything that drop
-      // causes: the row it is stored as and — through the drop it belongs to —
-      // where its terms and its matter land in time. Reading the clock again later
-      // would let a slow reading move a fragment's moment, and a span is a number
-      // this product decides on.
-      const at = now();
-      const stored = await store.appendDrop(body, safe, at);
-
-      // The quiet window is armed before anything else runs. It is a fact about
-      // *this drop arriving* rather than about what was read out of it, so it may
-      // not wait on a provider; what the drop added to the accumulation is counted
-      // later, once it has actually been attached.
-      armQuietWindow();
-
-      // Read the drop in the background. This is the decision the whole product
-      // is shaped around: a drop returns in the time it takes to write one row,
-      // so a provider that is slow, down, or still thinking cannot delay the
-      // user.
-      //
-      // The items this produces are therefore *not* in the return value — they
-      // do not exist yet. The caller finds them by reading the drop again, and
-      // so does a page refresh, which is why both paths are the same code.
-      //
-      // `extractInto` never rejects, so this floating promise cannot become an
-      // unhandled rejection — including when the provider throws synchronously,
-      // which is why the call happens inside an async function rather than as a
-      // bare `provider.extract(...)` guarded by `.catch(...)`. Awaiting inside
-      // `extractInto` also means the reply is composed only after the drop row
-      // exists, so it cannot race the store.
-      void extractInto(stored);
-
-      // Compose the styled reply to what the user just said. Like extraction, it
-      // does not gate the drop: it replaces the line the drop was caught with,
-      // and only if it passes the parent-voice checks.
-      void replyInto(stored, situation);
-
-      return { body: stored.body, reply: stored.reply ?? safe, id: stored.id };
+      return recordDrop(body, null);
     },
 
     async listDrops(): Promise<readonly DropSummary[]> {
@@ -1605,46 +1800,78 @@ export function createDomain(options: DomainCoreOptions): Domain {
     },
 
     async listConclusions(): Promise<readonly Conclusion[]> {
-      // Read the terms once and share the map: what a conclusion needs from a
-      // term is its wording, and one read of the whole list beats a lookup per
-      // supporting term — the same trade `listLinks` makes.
-      const terms = new Map((await store.listTerms()).map((term) => [term.id, term]));
+      return conclusionViews();
+    },
+
+    async markConclusionWrong(conclusionId: string): Promise<Conclusion | null> {
+      // Queued behind the looks, because this writes to the very chain a look is
+      // reading: a correction that landed mid-settlement would leave the sentence
+      // being composed pointing at the predecessor the user has just rejected.
+      const written = await queueRevision(async (): Promise<StoredConclusion | null> => {
+        const stored = await store.listConclusions();
+        const target = stored.find((conclusion) => conclusion.id === conclusionId);
+        if (target === undefined) return null;
+        // A judgement is what a person can disagree with. A correction is the
+        // product's note of something the user **did**, which is a fact about them
+        // and not a reading of them — so there is nothing in it to reject, and
+        // nothing is written.
+        if (target.kind === 'correction') return null;
+        // The second tap is the same fact. Appending another record for it would
+        // make the chain count taps instead of corrections.
+        const already = stored.find(
+          (conclusion) =>
+            conclusion.relation === 'overturn' && conclusion.supersedes === conclusionId,
+        );
+        if (already !== undefined) return already;
+
+        return store.appendConclusion({
+          matterId: target.matterId,
+          // Nothing of its own was written: what a correction holds is the user's
+          // own act, stated in code's words, so there is no sentence to hand the
+          // surfacing moment and nothing to be phrased.
+          claim: null,
+          text: CORRECTION_LINE,
+          kind: 'correction',
+          // No band, and no numbers: a correction asserts nothing about the user,
+          // so there is nothing for a wording to be read off. The numbers the
+          // rejected sentence was worded by stay on that sentence.
+          tier: null,
+          softened: false,
+          relation: 'overturn',
+          supersedes: target.id,
+          createdAt: now(),
+          mentions: 0,
+          spanDays: 0,
+          averageStrength: 0,
+          // The tap is the ground, and it needs no evidence behind it. The words
+          // the rejected sentence stood on are still listed with **that**
+          // sentence, which is where the user can go and read them.
+          supportTermIds: [],
+        });
+      });
+
+      if (written === null) return null;
+      // Read back through the same assembly the page gets, so the record handed
+      // to the caller carries the relations it was just given rather than the
+      // half-built row the store returned.
+      return (await conclusionViews()).find((conclusion) => conclusion.id === written.id) ?? null;
+    },
+
+    async appendToConclusion(
+      conclusionId: string,
+      body: string,
+    ): Promise<ConclusionAddition | null> {
       const stored = await store.listConclusions();
-      const byId = new Map(stored.map((conclusion) => [conclusion.id, conclusion]));
+      const target = stored.find((conclusion) => conclusion.id === conclusionId);
+      // Nothing is written for a conclusion that is not there: the sentence was
+      // meant to sit beside something, and a drop with no "beside" is not the
+      // thing the user asked for.
+      if (target === undefined) return null;
 
-      // `supersededBy` is the reverse of `supersedes`, and it is derived rather
-      // than stored: a conclusion cannot know it will be revised. It is filled
-      // in here so the chain can be read in both directions without the page
-      // having to pair the list up itself.
-      const revisedBy = new Map<string, string>();
-      for (const conclusion of stored) {
-        if (conclusion.supersedes !== null) revisedBy.set(conclusion.supersedes, conclusion.id);
-      }
-      const ref = (id: string | null | undefined): ConclusionRef | null => {
-        const found = id === null || id === undefined ? undefined : byId.get(id);
-        return found === undefined ? null : { id: found.id, text: found.text };
-      };
-
-      return stored.map((conclusion) => ({
-        id: conclusion.id,
-        text: conclusion.text,
-        kind: conclusion.kind,
-        tier: conclusion.tier,
-        relation: conclusion.relation,
-        supersedes: ref(conclusion.supersedes),
-        supersededBy: ref(revisedBy.get(conclusion.id)),
-        createdAt: conclusion.createdAt,
-        mentions: conclusion.mentions,
-        spanDays: conclusion.spanDays,
-        averageStrength: conclusion.averageStrength,
-        // A supporting term the store can no longer name is left out rather than
-        // shown as a blank: a conclusion listed with a nameless prop would be a
-        // judgement with evidence the user cannot read.
-        support: conclusion.supportTermIds
-          .map((termId) => terms.get(termId))
-          .filter((term): term is StoredTerm => term !== undefined)
-          .map(toNamedTerm),
-      }));
+      // The same path an ordinary drop takes, with the one thing the user has
+      // already decided handed to it in advance.
+      const drop = await recordDrop(body, target.matterId);
+      return { conclusion: { id: target.id, text: target.text }, drop };
     },
 
     async requestSurfacing(options?: SurfacingOptions): Promise<SurfacingResult> {

@@ -13,8 +13,11 @@
  *  - Nothing settles while the fragments are still coming in (the quiet window),
  *    which is checked by pinning a window far longer than the check and finding
  *    the portrait empty afterwards.
- *  - The **portrait is read-only**: there is no endpoint that asks the user to
- *    maintain anything, because settling needs no participation at all.
+ *  - Settling takes **no participation at all**: there is no endpoint that asks
+ *    the user to maintain the portrait. (Ticket 10 later opened exactly two
+ *    writes under `/api/conclusions/<id>/` — the tap and the note — and they are
+ *    not steps in any settling the user has to keep up with; `POST
+ *    /api/conclusions` is still not an operation, which is what this checks.)
  *
  *   node tools/e2e-ticket-05.mjs
  */
@@ -220,10 +223,12 @@ try {
     );
   });
 
-  await check('the portrait is read-only, and the page is handed nothing to maintain', async () => {
-    // A write to the portrait is not "unimplemented but coming": there is no such
-    // operation, because settling takes no part from the user. A 405 is the
-    // honest answer, and a 200 for something that did nothing would not be.
+  await check('settling asks nothing of the user, and the portrait has no general write', async () => {
+    // A write "to the portrait as a whole" is not "unimplemented but coming":
+    // there is no such operation, because settling takes no part from the user.
+    // A 405 is the honest answer, and a 200 for something that did nothing would
+    // not be. Ticket 10's two per-conclusion writes live under an id and are
+    // checked in their own script.
     const written = await post(server.base, '/api/conclusions', { text: '不对' });
     assert.equal(written.status, 405, 'nothing about the portrait may be written');
   });

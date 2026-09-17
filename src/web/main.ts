@@ -166,18 +166,21 @@ interface ConclusionRef {
 }
 
 /**
- * One thing the product worked out on its own, as the server reports it.
+ * One record on the chain, as the server reports it.
  *
  * The three numbers beside the sentence are the ones its wording was read off,
  * and they travel to the page on purpose: the product should be able to say why
  * it spoke the way it did, and a number the user can read is what makes that an
- * answer rather than a reassurance.
+ * answer rather than a reassurance. A `correction` carries zeros and no support,
+ * because nothing was read off anything for it — it records what the user did,
+ * and the page does not ask it to explain itself.
  */
 interface Conclusion {
   readonly id: string;
   readonly text: string;
-  readonly kind: 'claim' | 'catch';
+  readonly kind: 'claim' | 'catch' | 'correction';
   readonly tier: 'weak' | 'medium' | 'strong' | null;
+  readonly softened: boolean;
   readonly relation: 'first' | 'inherit' | 'overturn';
   readonly supersedes: ConclusionRef | null;
   readonly supersededBy: ConclusionRef | null;
@@ -186,6 +189,17 @@ interface Conclusion {
   readonly mentions: number;
   readonly spanDays: number;
   readonly averageStrength: number;
+}
+
+/**
+ * A sentence the user wrote beside a conclusion, and the drop it became.
+ *
+ * Mirrored rather than imported, like everything else in this file: it is browser
+ * code and takes nothing from `src/domain/`.
+ */
+interface ConclusionAddition {
+  readonly conclusion: ConclusionRef;
+  readonly drop: { readonly id: string; readonly body: string; readonly reply: string };
 }
 
 /**
@@ -871,11 +885,16 @@ async function settleAccumulation(): Promise<void> {
  * How firmly the sentence was allowed to speak, in the words the page shows.
  *
  * A catch is not a weak claim: it is the substitute for one, so it says so
- * rather than taking a band it never earned. A surfacing is never a catch — one
- * asserts nothing, so there is nothing in it to push — which is why the band is
- * the whole story there.
+ * rather than taking a band it never earned. A correction is not a claim at all
+ * — it is what the user did to the one before it — so it says that instead. A
+ * surfacing is never either of those: one asserts nothing and the other is not
+ * the product's to show, so the band is the whole story there.
  */
-function bandLabel(kind: 'claim' | 'catch', tier: 'weak' | 'medium' | 'strong' | null): string {
+function bandLabel(
+  kind: 'claim' | 'catch' | 'correction',
+  tier: 'weak' | 'medium' | 'strong' | null,
+): string {
+  if (kind === 'correction') return '修正';
   if (kind === 'catch') return '承接';
   if (tier === 'strong') return '强档';
   if (tier === 'medium') return '中档';
@@ -905,15 +924,45 @@ function whySpoken(spoken: {
 }
 
 /**
- * Render one conclusion, with what supports it and where it sits in the chain.
+ * Whether the chain has already answered this record with a correction.
+ *
+ * One rule with one name, because two things ask it — what the forward relation
+ * says, and whether the record may still be rejected — and a page that answered
+ * it twice could show "后来被你标为不对" on a row that still offered the button.
+ *
+ * @param conclusion - the record being read.
+ * @param corrections - the ids of the corrections on the chain.
+ * @returns true when this record has been rejected.
+ */
+function isOverturned(conclusion: Conclusion, corrections: ReadonlySet<string>): boolean {
+  return conclusion.supersededBy !== null && corrections.has(conclusion.supersededBy.id);
+}
+
+/**
+ * Render one record on the chain, with what supports it and where it sits.
  *
  * The support terms are the user's own words, so the sentence can be checked
  * against them — a judgement nobody can check is one they have to take on trust,
  * and this product does not ask for that. The chain is shown as a sentence of
- * its own ("承自…"), because "which of these came first" is part of what makes a
- * portrait read as a history rather than as a list of verdicts.
+ * its own ("承自…", "推翻了…"), because "which of these came first" is part of
+ * what makes a portrait read as a history rather than as a list of verdicts.
+ *
+ * The two light actions sit on the record they are about (10), and they are the
+ * only things a conclusion can be given: 「不对」 is offered where there is a
+ * judgement to disagree with and nothing has been said against it yet, and 「补
+ * 一句自己的话」 everywhere — including beside a correction, where writing down
+ * what one actually meant is the obvious next thing. There is deliberately
+ * nothing else: no score, no thumb, no "tell me more like this".
+ *
+ * @param conclusion - the record to render.
+ * @param corrections - the ids of the corrections on the chain, so a relation can
+ *   say what it points at — a successor that is a correction is not a record that
+ *   "carried on", and the page says so.
  */
-function renderConclusion(conclusion: Conclusion): HTMLLIElement {
+function renderConclusion(
+  conclusion: Conclusion,
+  corrections: ReadonlySet<string>,
+): HTMLLIElement {
   const row = document.createElement('li');
   row.className = `conclusion-row conclusion-${conclusion.kind}`;
 
@@ -938,21 +987,38 @@ function renderConclusion(conclusion: Conclusion): HTMLLIElement {
   if (conclusion.supersedes !== null) {
     const chain = document.createElement('span');
     chain.className = 'conclusion-chain';
-    chain.textContent = `承自「${conclusion.supersedes.text}」`;
+    chain.textContent =
+      conclusion.kind === 'correction'
+        ? `推翻了「${conclusion.supersedes.text}」`
+        : `承自「${conclusion.supersedes.text}」`;
     meta.append(chain);
   }
   if (conclusion.supersededBy !== null) {
     const chain = document.createElement('span');
     chain.className = 'conclusion-chain';
-    chain.textContent = `后来被「${conclusion.supersededBy.text}」接过`;
+    chain.textContent = isOverturned(conclusion, corrections)
+      ? '后来被你标为不对'
+      : `后来被「${conclusion.supersededBy.text}」接过`;
     meta.append(chain);
   }
 
-  const why = document.createElement('p');
-  why.className = 'conclusion-why';
-  why.textContent = `为什么这么说：${whySpoken(conclusion)}`;
+  row.append(text, meta);
 
-  row.append(text, meta, why);
+  // What it was read off, and only where there was something to read it off:
+  // asking a correction to explain itself would be asking the user's own tap to
+  // justify itself with numbers it never had.
+  if (conclusion.kind !== 'correction') {
+    const why = document.createElement('p');
+    why.className = 'conclusion-why';
+    // The step down is named here rather than left to be worked out from the
+    // numbers, because the numbers alone earn the band above them: a reader who
+    // checked would otherwise find the page telling two stories about one
+    // sentence. The fourth input is the user's own rejection.
+    why.textContent = conclusion.softened
+      ? `为什么这么说：${whySpoken(conclusion)}（这件事你标过不对，语气退了一档）`
+      : `为什么这么说：${whySpoken(conclusion)}`;
+    row.append(why);
+  }
 
   if (conclusion.support.length > 0) {
     const support = document.createElement('ul');
@@ -966,16 +1032,148 @@ function renderConclusion(conclusion: Conclusion): HTMLLIElement {
     row.append(support);
   }
 
+  row.append(renderConclusionActions(conclusion, corrections));
   return row;
+}
+
+/**
+ * The two light things the user may do to one conclusion.
+ *
+ * Both are one tap and one sentence, and neither asks the user to supply
+ * anything the product should already know: 「不对」 carries no reason, and the
+ * box for a sentence is a box and not a form. That is the shape of the product
+ * rather than an unfinished version of feedback — a conclusion is not something
+ * the user maintains (`CONTEXT.md`, 无感).
+ */
+function renderConclusionActions(
+  conclusion: Conclusion,
+  corrections: ReadonlySet<string>,
+): HTMLElement {
+  const actions = document.createElement('div');
+  actions.className = 'conclusion-actions';
+
+  // Offered only where there is a judgement to disagree with, and only while
+  // nothing has been said against it: a second tap is the same fact, and the
+  // product does not collect taps. The domain refuses the same two cases, so the
+  // page is not the only thing standing between a caller and a meaningless
+  // record — it is only the thing that keeps the button off the screen.
+  if (conclusion.kind !== 'correction' && !isOverturned(conclusion, corrections)) {
+    const wrong = document.createElement('button');
+    wrong.type = 'button';
+    wrong.className = 'conclusion-wrong';
+    wrong.textContent = '这条不对';
+    wrong.addEventListener('click', () => void markWrong(conclusion.id, wrong));
+    actions.append(wrong);
+  }
+
+  const openNote = document.createElement('button');
+  openNote.type = 'button';
+  openNote.className = 'conclusion-note-open';
+  openNote.textContent = '补一句自己的话';
+
+  const note = document.createElement('form');
+  note.className = 'conclusion-note';
+  note.hidden = true;
+
+  const noteInput = document.createElement('textarea');
+  noteInput.className = 'conclusion-note-input';
+  noteInput.rows = 2;
+  noteInput.placeholder = '比如：其实不是期末，是论文那边的事';
+  noteInput.setAttribute('aria-label', '补一句自己的话');
+
+  const noteSend = document.createElement('button');
+  noteSend.type = 'submit';
+  noteSend.className = 'conclusion-note-send';
+  noteSend.textContent = '补上';
+
+  const noteLine = document.createElement('p');
+  noteLine.className = 'conclusion-note-line';
+  noteLine.setAttribute('role', 'status');
+  noteLine.setAttribute('aria-live', 'polite');
+
+  note.append(noteInput, noteSend);
+  openNote.addEventListener('click', () => {
+    note.hidden = false;
+    openNote.hidden = true;
+    noteInput.focus();
+  });
+  note.addEventListener('submit', (event) => {
+    event.preventDefault();
+    void addNote(conclusion.id, noteInput, noteSend, noteLine);
+  });
+
+  actions.append(openNote, note, noteLine);
+  return actions;
+}
+
+/**
+ * Mark one conclusion wrong, and show the chain with the correction on it.
+ *
+ * The button is disabled while the request is out and stays disabled once it has
+ * landed, because the reload that follows renders the record as overturned — a
+ * second tap would be the same fact, and there is nothing for it to do.
+ */
+async function markWrong(conclusionId: string, button: HTMLButtonElement): Promise<void> {
+  button.disabled = true;
+  const response = await fetch(`/api/conclusions/${encodeURIComponent(conclusionId)}/wrong`, {
+    method: 'POST',
+  });
+  if (!response.ok) {
+    button.disabled = false;
+    button.textContent = '没能标上，再试一次';
+    return;
+  }
+  await loadConclusions();
+}
+
+/**
+ * Write a sentence beside one conclusion, and settle what it sets off.
+ *
+ * The sentence is a **drop**, so it is answered like one and everything behind it
+ * runs the same way — reading, wording, settling. The page therefore waits for
+ * it exactly as it waits for a drop typed at the top, and shows the line it was
+ * answered with rather than a "saved" of its own invention.
+ */
+async function addNote(
+  conclusionId: string,
+  input: HTMLTextAreaElement,
+  send: HTMLButtonElement,
+  line: HTMLParagraphElement,
+): Promise<void> {
+  const body = input.value.trim();
+  if (body.length === 0) {
+    line.textContent = '还没写呢。';
+    return;
+  }
+
+  send.disabled = true;
+  const response = await fetch(`/api/conclusions/${encodeURIComponent(conclusionId)}/append`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ body }),
+  });
+  if (!response.ok) {
+    send.disabled = false;
+    line.textContent = '这次没写进去，再试一次。';
+    return;
+  }
+
+  const payload = (await response.json()) as { addition: ConclusionAddition };
+  input.value = '';
+  await loadDrops();
+  const settled = await settleDrop(payload.addition.drop.id, payload.addition.drop.reply);
+  line.textContent = settled?.reply ?? payload.addition.drop.reply;
+  send.disabled = false;
+  await settleAccumulation();
 }
 
 /**
  * Load the portrait — which is the conclusion chain.
  *
  * One read for both, because they are one thing: the portrait is the set of
- * conclusions, and the chain is the relations between them. Nothing here is
- * editable, and that is the shape of the feature rather than an omission —
- * settling needs no participation from the user, so there is no step to keep.
+ * conclusions, and the chain is the relations between them. What the user may do
+ * here is the two light things ticket 10 opened, and nothing else — settling
+ * still needs no participation from them, so there is no step to keep.
  *
  * @returns the conclusions as last read, or null when the server could not answer.
  */
@@ -983,7 +1181,18 @@ async function loadConclusions(): Promise<readonly Conclusion[] | null> {
   const response = await fetch('/api/conclusions');
   if (!response.ok) return null;
   const payload = (await response.json()) as { conclusions: Conclusion[] };
-  conclusionList.replaceChildren(...payload.conclusions.map(renderConclusion));
+  // What each row needs of the others is one bit — whether the record that
+  // replaced it was a correction — so the page keeps that and not the whole
+  // chain: a row that could look up any other record would be a row that could
+  // start depending on the rest of the portrait.
+  const corrections = new Set(
+    payload.conclusions
+      .filter((conclusion) => conclusion.kind === 'correction')
+      .map((conclusion) => conclusion.id),
+  );
+  conclusionList.replaceChildren(
+    ...payload.conclusions.map((conclusion) => renderConclusion(conclusion, corrections)),
+  );
   conclusionEmpty.hidden = payload.conclusions.length > 0;
   return payload.conclusions;
 }

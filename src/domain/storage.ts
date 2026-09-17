@@ -50,6 +50,19 @@ export interface StoredDrop {
    * if and only if the provider returns a reply that passes the checks.
    */
   readonly reply: string | null;
+  /**
+   * The matter this drop belongs to because the user said so, or null.
+   *
+   * Set only for a sentence written **beside a conclusion** (ticket 10): the user
+   * put it there, which is a clearer statement of what it is about than any
+   * overlap the product could measure. Null is the ordinary case — a fragment
+   * typed at the top is attached by inference like everything else.
+   *
+   * It is a wish rather than a fact about the material: the matter may be gone by
+   * the time the drop is read, and a drop whose pin no longer resolves is read by
+   * the ordinary rules instead. Nothing keeps a matter alive on account of a pin.
+   */
+  readonly pinnedMatterId: string | null;
 }
 
 /** One stored item, as the store keeps it. */
@@ -230,10 +243,19 @@ export interface StoredConclusion {
   readonly claim: string | null;
   /** The sentence, frame included. */
   readonly text: string;
-  /** Whether it claims a pattern, or catches the newest feeling. */
+  /** Whether it claims a pattern, catches the newest feeling, or records a correction. */
   readonly kind: ConclusionKind;
-  /** The wording band, or null for a catch. */
+  /** The wording band, or null for a catch and a correction. */
   readonly tier: ConclusionTier | null;
+  /**
+   * Whether the band was written one step below what the numbers earned.
+   *
+   * Stored rather than derived, because it is a fact about the moment the
+   * sentence was assembled: a matter may be rejected after this conclusion was
+   * written, and reading the reason back off today's chain would then explain a
+   * band by something that had not happened yet when it was chosen.
+   */
+  readonly softened: boolean;
   /** How it stands to the earlier conclusion for the same matter. */
   readonly relation: ConclusionRelation;
   /** The conclusion it carries on from, or null when it opened the chain. */
@@ -418,8 +440,16 @@ export interface DropStore {
    * @param body - the user's text, stored byte-for-byte.
    * @param reply - the line the drop is answered with.
    * @param at - when it arrived, as an ISO-8601 string, from the domain's clock.
+   * @param pinnedMatterId - the matter the user wrote it beside, or null for a
+   *   drop typed at the top. Stored as given: resolving it, and falling back when
+   *   it no longer resolves, belongs to whoever reads the drop back.
    */
-  appendDrop(body: string, reply: string, at: string): Promise<StoredDrop>;
+  appendDrop(
+    body: string,
+    reply: string,
+    at: string,
+    pinnedMatterId: string | null,
+  ): Promise<StoredDrop>;
 
   /**
    * Replace a drop's reply with the checked one the provider composed.

@@ -167,26 +167,37 @@ export type ConclusionTier = 'weak' | 'medium' | 'strong';
 export const CONCLUSION_TIERS: readonly ConclusionTier[] = ['weak', 'medium', 'strong'];
 
 /**
- * Whether a conclusion claims something, or only catches the newest feeling.
+ * What a record on the chain is: something the product worked out, or something
+ * the user did to it.
  *
  * A `catch` is what the product says when it has crossed the threshold but does
  * not have enough material to say anything about a pattern: it names the feeling
  * the newest fragment carried and claims nothing. It is the **substitute** for a
  * conclusion, not a weaker one — which is why it carries no tier and no
  * uncertain wording (there is nothing it is asserting).
+ *
+ * A `correction` is the one entry on the chain that is **not a judgement at
+ * all**: it records that the user rejected the entry before it (ticket 10). It
+ * is kept apart from the other two because the three ask different things of a
+ * reader — "this is what I make of you", "this is as much as I can hold", "this
+ * is what you told me about the last one" — and because the chain's whole
+ * promise is that the product's past cannot be quietly edited: the rejection is
+ * added beside the sentence, never written over it.
  */
-export type ConclusionKind = 'claim' | 'catch';
+export type ConclusionKind = 'claim' | 'catch' | 'correction';
 
 /** Every kind, for the same reason as `CONCLUSION_TIERS`. */
-export const CONCLUSION_KINDS: readonly ConclusionKind[] = ['claim', 'catch'];
+export const CONCLUSION_KINDS: readonly ConclusionKind[] = ['claim', 'catch', 'correction'];
 
 /**
  * How a conclusion stands to the one before it in the same matter.
  *
  * `first` opens the chain for that matter, `inherit` carries it on, and
- * `overturn` is the user's own correction of the one before it (ticket 10 — the
- * value is declared here because a store reading a relation it cannot name must
- * not quietly drop the conclusion carrying it).
+ * `overturn` is the user's own correction of the one before it (ticket 10).
+ * `overturn` is the relation a `correction` always carries, and the two are not
+ * the same fact: the kind says what the record is, the relation says how it
+ * stands — and a store reading a relation it cannot name must not quietly drop
+ * the conclusion carrying it.
  */
 export type ConclusionRelation = 'first' | 'inherit' | 'overturn';
 
@@ -215,15 +226,38 @@ export interface Conclusion {
   readonly id: string;
   /** The sentence the user reads, frame included. */
   readonly text: string;
-  /** Whether it claims something, or only catches the newest feeling. */
+  /**
+   * Whether it claims a pattern, catches the newest feeling, or records a
+   * correction the user made.
+   */
   readonly kind: ConclusionKind;
   /**
-   * The wording band the numbers earned, or null for a `catch`.
+   * The wording band the numbers earned, or null when there is no assertion to
+   * be in one.
    *
-   * Null is not "unknown": a catch asserts nothing, so there is no strength of
-   * assertion for it to be in.
+   * Null is not "unknown": a catch and a correction both assert nothing about
+   * the user — one holds a line that was already said to them, the other records
+   * something they did — so there is no strength of assertion for either to be
+   * in.
+   *
+   * This is the band the sentence was actually written in, which on a matter the
+   * user has rejected is one step below what the three numbers below earn. That
+   * difference is not left to be inferred: see `softened`.
    */
   readonly tier: ConclusionTier | null;
+  /**
+   * Whether the band above was written one step below what the numbers earned.
+   *
+   * True only where the step actually changed something: a claim whose numbers
+   * already earned the weakest band is not "softened", because nothing was. It
+   * travels with the record rather than being derived from the chain later,
+   * because it is a fact about **the moment the sentence was written** — and
+   * because the alternative is a portrait where the band and the numbers beside
+   * it tell two stories, which is exactly what reading a band off numbers exists
+   * to prevent (`conclusions.ts`). The page shows it as the fourth input: the
+   * numbers, and the user's own rejection.
+   */
+  readonly softened: boolean;
   /** How it stands to the earlier conclusion for the same matter. */
   readonly relation: ConclusionRelation;
   /** The conclusion this one carries on from, or null when it opened the chain. */
@@ -244,9 +278,19 @@ export interface Conclusion {
    * The whole accumulated set, not only what arrived since the last conclusion:
    * what the sentence is about is the matter, and a support list that named only
    * the newest fragments would show the user a smaller case than the one it made.
+   *
+   * Empty on a `correction`, and deliberately so: nothing was assembled for it
+   * and nothing stands behind it — what it rests on is the user's own act, which
+   * needs no evidence and cannot be given any.
    */
   readonly support: readonly NamedTerm[];
-  /** How many times the matter had been raised when this was assembled. */
+  /**
+   * How many times the matter had been raised when this was assembled.
+   *
+   * Zero on a `correction`, together with the two numbers below: nothing was
+   * read off them for it, and the numbers the rejected conclusion was worded by
+   * are still on that conclusion, where they belong.
+   */
   readonly mentions: number;
   /** How many whole days the matter had spanned, as the bands are read. */
   readonly spanDays: number;
@@ -280,6 +324,29 @@ export interface DropResult {
    * the drop back passes the same value straight through.
    */
   readonly id: string;
+}
+
+/**
+ * A sentence the user wrote beside a conclusion, and the drop it became.
+ *
+ * Both halves are reported because both are true at once: the sentence is a
+ * **drop** like any other — stored verbatim, read for terms, answered, counted
+ * when it settles — and it was written *beside one particular conclusion*, which
+ * is why it is told apart from a fragment typed into the box at the top. What a
+ * caller does with it is the page's business; what it must not do is treat the
+ * two halves as one thing, and this shape is what keeps that from happening.
+ */
+export interface ConclusionAddition {
+  /**
+   * The conclusion it was written beside, named well enough to point at.
+   *
+   * The same reading a person would take: the note belongs to *that* sentence,
+   * which is why it is written here rather than left to be inferred from the
+   * words the note happened to use.
+   */
+  readonly conclusion: ConclusionRef;
+  /** The drop the sentence became, in the shape `drop` hands one back. */
+  readonly drop: DropResult;
 }
 
 /**
@@ -666,6 +733,14 @@ export interface Upcoming {
  * `previewDeletion` answers what would go; `deleteDrop` carries out a choice the
  * caller has to have made, and `keep` is a value rather than an omission so that
  * "delete nothing" cannot happen by accident.
+ *
+ * Ticket 10 opens the two things the user may do to a conclusion, and both are
+ * light on purpose (`CONTEXT.md`, 结论链): marking one wrong adds a record of the
+ * correction beside it rather than touching the sentence it rejects, and writing
+ * a sentence of their own beside it makes that sentence a **drop**, which is to
+ * say the same kind of thing as anything else they type. Neither is a rating, a
+ * like or a bulk answer — that is the line this product does not cross, because
+ * a portrait the user maintains is a portrait they have been made to work on.
  */
 export interface Domain {
   /**
@@ -782,12 +857,78 @@ export interface Domain {
    *
    * Read-only, and that is the shape of the product rather than an omission:
    * settling needs no participation from the user, so there is no step here to
-   * maintain. The two things the user may do to a conclusion (mark it wrong, and
-   * add a sentence of their own) arrive with ticket 10.
+   * maintain. The two things the user may do to a conclusion are
+   * `markConclusionWrong` and `appendToConclusion` below, and neither of them is a
+   * way of maintaining anything.
    *
    * @returns every conclusion, oldest first.
    */
   listConclusions(): Promise<readonly Conclusion[]>;
+
+  /**
+   * Mark one conclusion wrong, as the user's own correction of it.
+   *
+   * The **chain only grows**. The conclusion being rejected is not overwritten,
+   * not invalidated and not deleted: it keeps its sentence, its evidence and its
+   * place, and what is added is a record beside it saying which one it replaces.
+   * That asymmetry is the point — the portrait is a history of what the product
+   * made of the user's material as it stood, and a history that can be edited
+   * after the fact is not one (ticket 09 reached the same conclusion about
+   * deletion, which is the other operation that could have rewritten the past).
+   *
+   * The record is **code's own line**: a fact about what the user did, stated
+   * plainly, with no model involved and no uncertainty wording. There is nothing
+   * for a model to judge here — the user has just told the product the judgement
+   * was wrong — and asking one to phrase it would be the product inventing a
+   * reading to take the place of the one it just lost.
+   *
+   * The rejection also reaches the material, and that is deliberate: a matter the
+   * user has rejected stops taking in fragments that merely look like it, and
+   * anything said about it afterwards is hedged a band further (see
+   * `ConclusionPolicy`). Saying "that is wrong" and then having the same reading
+   * come back tomorrow is the one answer the product must not give.
+   *
+   * Marking the same conclusion wrong twice records one correction, not two: the
+   * second tap is the same fact, and a chain that grew a record per tap would be
+   * counting the user's clicks rather than their corrections.
+   *
+   * Only a **judgement** may be rejected. A `correction` is the product's note of
+   * something the user did — a fact about them rather than a reading of them —
+   * and there is nothing in it to disagree with, so nothing is written for one.
+   *
+   * @param conclusionId - the conclusion the user is rejecting.
+   * @returns the record added beside it, or null when **nothing was recorded**:
+   *   either there is no such conclusion, or it is a correction. The two are not
+   *   told apart here for the same reason `deleteDrop` does not tell "no such
+   *   drop" from `keep` apart — what the caller asked for either way is "reject
+   *   this", and neither answer is an error.
+   */
+  markConclusionWrong(conclusionId: string): Promise<Conclusion | null>;
+
+  /**
+   * Write a sentence of the user's own beside one conclusion.
+   *
+   * The sentence becomes a **drop** — the same kind of thing as anything typed
+   * into the box at the top: stored byte-for-byte, read for its own terms, linked
+   * and answered, and counted when it settles. It is told apart from an ordinary
+   * drop in exactly one respect, and it is the respect the user just expressed by
+   * typing there rather than at the top: it belongs to **that** conclusion's
+   * matter. The product does not re-infer which thing the note was about, because
+   * the user has already said so more clearly than any overlap could.
+   *
+   * That reading is not a shortcut. It is what keeps the note from wandering: an
+   * inferred attachment would be *damped* on a matter the user has rejected
+   * (`markConclusionWrong`), so a note written beside a rejected conclusion could
+   * otherwise land in a matter of its own and be about nothing the user meant.
+   *
+   * A conclusion that does not exist is reported as null rather than as an error,
+   * and nothing is written — the same reading `getDrop` takes.
+   *
+   * @param conclusionId - the conclusion the sentence is written beside.
+   * @param body - the sentence as typed. Stored verbatim.
+   * @returns the drop it became, and the conclusion it was written beside.
+   */
+  appendToConclusion(conclusionId: string, body: string): Promise<ConclusionAddition | null>;
 
   /**
    * Ask the product to **surface** one thing it has worked out.

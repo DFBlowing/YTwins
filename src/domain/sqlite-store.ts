@@ -121,15 +121,26 @@ import type {
  * is gone cannot have been shown. The same ticket adds `conclusion_.claim`: the
  * sentence the provider wrote, kept beside the framed line rather than recovered
  * from it, because the surfacing moment writes its own opening in front of it.
+ *
+ * Ticket 10 adds one nullable column, `drop_.pinned_matter_id`, and it is the
+ * same shape of choice as `anchor_term_id`: a fact about *this drop* that only
+ * this drop can know. It records a sentence written beside a conclusion, which
+ * the user has thereby attached to that matter themselves — so it is deliberately
+ * set-null rather than cascading: a matter that goes away must not take the drop
+ * with it, and a drop whose pin no longer resolves is read by the ordinary
+ * attachment rules. Nothing else in the schema changes for the chain's
+ * overturned relation; a correction is a `conclusion_` row like any other, and
+ * `relation` / `supersedes` already had the values it needs.
  */
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS drop_ (
-  id             TEXT PRIMARY KEY,
-  body           TEXT NOT NULL,
-  dropped_at     TEXT NOT NULL,
-  input_type     TEXT,
-  reply          TEXT NOT NULL,
-  anchor_term_id TEXT REFERENCES term_(id) ON DELETE SET NULL
+  id               TEXT PRIMARY KEY,
+  body             TEXT NOT NULL,
+  dropped_at       TEXT NOT NULL,
+  input_type       TEXT,
+  reply            TEXT NOT NULL,
+  anchor_term_id   TEXT REFERENCES term_(id) ON DELETE SET NULL,
+  pinned_matter_id TEXT REFERENCES matter_(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS item_ (
@@ -204,6 +215,7 @@ CREATE TABLE IF NOT EXISTS conclusion_ (
   text         TEXT NOT NULL,
   kind         TEXT NOT NULL,
   tier         TEXT,
+  softened     INTEGER NOT NULL DEFAULT 0,
   relation     TEXT NOT NULL,
   supersedes   TEXT REFERENCES conclusion_(id) ON DELETE SET NULL,
   created_at   TEXT NOT NULL,
@@ -249,6 +261,7 @@ interface DropRow {
   readonly input_type: string | null;
   readonly reply: string | null;
   readonly anchor_term_id: string | null;
+  readonly pinned_matter_id: string | null;
 }
 
 /** A matter row as SQLite hands it back. */
@@ -282,6 +295,7 @@ interface ConclusionRow {
   readonly text: string;
   readonly kind: string;
   readonly tier: string | null;
+  readonly softened: number;
   readonly relation: string;
   readonly supersedes: string | null;
   readonly created_at: string;
@@ -362,6 +376,7 @@ function toStoredDrop(row: DropRow): StoredDrop {
     inputType: readInputType(row.input_type),
     anchorTermId: row.anchor_term_id,
     reply: row.reply,
+    pinnedMatterId: row.pinned_matter_id,
   };
 }
 
@@ -454,6 +469,7 @@ function toStoredConclusion(
     text: row.text,
     kind,
     tier,
+    softened: row.softened !== 0,
     relation,
     supersedes: row.supersedes,
     createdAt: row.created_at,
@@ -569,13 +585,27 @@ export function openSqliteStore(file: string): DropStore {
   // Ticket 09's schema change, for a file written by tickets 01–08. Not a column
   // this time but a dropped reference, which `ALTER TABLE` cannot do.
   dropTermOriginCascade(db);
+  // Ticket 10's column, for a file written by tickets 01–09. Nullable and
+  // null by default, which is what makes it addable without a rewrite — and the
+  // reference is carried here too, so a migrated file behaves like a fresh one
+  // rather than keeping a pin pointing at a matter that was deleted since.
+  ensureColumn(db, 'drop_', 'pinned_matter_id', 'TEXT REFERENCES matter_(id) ON DELETE SET NULL');
+  // Ticket 10's other column, and this one is read by a rule (the page says why a
+  // sentence was hedged), so like `item_.state` it is added **with** a default: an
+  // old file's conclusions were written before a rejection could soften anything,
+  // and "not softened" is what each of them is.
+  ensureColumn(db, 'conclusion_', 'softened', 'INTEGER NOT NULL DEFAULT 0');
 
-  const insertDrop = db.prepare('INSERT INTO drop_ (id, body, dropped_at, reply) VALUES (?, ?, ?, ?)');
+  const insertDrop = db.prepare(
+    `INSERT INTO drop_ (id, body, dropped_at, reply, pinned_matter_id) VALUES (?, ?, ?, ?, ?)`,
+  );
   const selectDrops = db.prepare(
-    'SELECT id, body, dropped_at, input_type, reply, anchor_term_id FROM drop_ ORDER BY dropped_at ASC, rowid ASC',
+    `SELECT id, body, dropped_at, input_type, reply, anchor_term_id, pinned_matter_id
+       FROM drop_ ORDER BY dropped_at ASC, rowid ASC`,
   );
   const selectDrop = db.prepare(
-    'SELECT id, body, dropped_at, input_type, reply, anchor_term_id FROM drop_ WHERE id = ?',
+    `SELECT id, body, dropped_at, input_type, reply, anchor_term_id, pinned_matter_id
+       FROM drop_ WHERE id = ?`,
   );
   const setInputType = db.prepare('UPDATE drop_ SET input_type = ? WHERE id = ?');
   const setAnchor = db.prepare('UPDATE drop_ SET anchor_term_id = ? WHERE id = ?');
@@ -681,11 +711,11 @@ export function openSqliteStore(file: string): DropStore {
 
   const insertConclusion = db.prepare(
     `INSERT INTO conclusion_
-       (id, matter_id, claim, text, kind, tier, relation, supersedes, created_at, mentions, span_days, avg_strength)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, matter_id, claim, text, kind, tier, softened, relation, supersedes, created_at, mentions, span_days, avg_strength)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const selectConclusions = db.prepare(
-    `SELECT id, matter_id, claim, text, kind, tier, relation, supersedes, created_at, mentions, span_days, avg_strength
+    `SELECT id, matter_id, claim, text, kind, tier, softened, relation, supersedes, created_at, mentions, span_days, avg_strength
        FROM conclusion_ ORDER BY created_at ASC, rowid ASC`,
   );
   const selectConclusionSupport = db.prepare(
@@ -811,7 +841,12 @@ export function openSqliteStore(file: string): DropStore {
   }
 
   return {
-    async appendDrop(body: string, reply: string, at: string): Promise<StoredDrop> {
+    async appendDrop(
+      body: string,
+      reply: string,
+      at: string,
+      pinnedMatterId: string | null,
+    ): Promise<StoredDrop> {
       const stored: StoredDrop = {
         id: randomUUID(),
         body,
@@ -820,8 +855,10 @@ export function openSqliteStore(file: string): DropStore {
         // Nothing has been read out of it yet, so nothing says what it is about.
         anchorTermId: null,
         reply,
+        // What the user said by writing it where they did, kept as they said it.
+        pinnedMatterId,
       };
-      insertDrop.run(stored.id, stored.body, stored.droppedAt, reply);
+      insertDrop.run(stored.id, stored.body, stored.droppedAt, reply, pinnedMatterId);
       return stored;
     },
 
@@ -1034,6 +1071,7 @@ export function openSqliteStore(file: string): DropStore {
           conclusion.text,
           conclusion.kind,
           conclusion.tier,
+          conclusion.softened ? 1 : 0,
           conclusion.relation,
           conclusion.supersedes,
           conclusion.createdAt,

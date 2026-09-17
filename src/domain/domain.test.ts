@@ -26,7 +26,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import { createDomain } from './core.ts';
-import type { ConclusionPolicy } from './conclusions.ts';
+import { checkConclusion, type ConclusionPolicy } from './conclusions.ts';
 import type { RespondRequest } from './ai-provider.ts';
 import {
   REPLY_THAT_BREAKS_THE_RULES,
@@ -1689,6 +1689,8 @@ function policy(overrides: Partial<ConclusionPolicy> = {}): ConclusionPolicy {
     claimFloor: 3,
     overlapRatio: 0.5,
     weightSharedBySpread: true,
+    overturnedOverlapFactor: 0.3,
+    overturnedBandDrop: 1,
     mediumTerms: 3,
     mediumSpanDays: 3,
     strongTerms: 6,
@@ -2217,6 +2219,7 @@ await check('a later conclusion carries the chain on, and the earlier one is not
           'kind',
           'mentions',
           'relation',
+          'softened',
           'spanDays',
           'supersededBy',
           'supersedes',
@@ -4176,8 +4179,18 @@ await check('keeping works when the anchor itself is the word only that fragment
       // attachment rules do not produce: the anchor is normally the feeling the
       // fragments keep repeating. This is the state a real database can still be
       // in after an earlier deletion, so it has to work.
-      const anchorDrop = await store.appendDrop('今天面试没过，心里很慌', '记下了。', '2026-09-01T00:00:00.000Z');
-      const otherDrop = await store.appendDrop('面试又挂了，好烦', '记下了。', '2026-09-02T00:00:00.000Z');
+      const anchorDrop = await store.appendDrop(
+        '今天面试没过，心里很慌',
+        '记下了。',
+        '2026-09-01T00:00:00.000Z',
+        null,
+      );
+      const otherDrop = await store.appendDrop(
+        '面试又挂了，好烦',
+        '记下了。',
+        '2026-09-02T00:00:00.000Z',
+        null,
+      );
       const anchorReading = await store.recordExtraction(
         anchorDrop.id,
         { inputType: 'emotion', items: [], terms: ['心里很慌'], anchor: '心里很慌' },
@@ -4211,6 +4224,7 @@ await check('keeping works when the anchor itself is the word only that fragment
         text: '我不太确定：你最近好像在等一个结果。',
         kind: 'catch',
         tier: null,
+        softened: false,
         relation: 'first',
         supersedes: null,
         createdAt: '2026-09-02T00:00:00.000Z',
@@ -4251,6 +4265,420 @@ await check('keeping works when the anchor itself is the word only that fragment
         matters[0] !== undefined && !matters[0].supportTermIds.includes(anchorTerm.id),
         'and it no longer counts a word nobody says',
       );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+console.log('\ndomain core — revising a conclusion');
+
+/**
+ * The line code owns for a correction.
+ *
+ * Spelled out here rather than imported from the module, for the same reason as
+ * every other expectation in this file: a check that reads the constant it is
+ * checking would agree with the implementation by construction. What this one
+ * buys is that the line the product writes into the portrait stays literally
+ * that line.
+ */
+const CORRECTION_LINE = '你标了这条不对。';
+
+/**
+ * The exam matter, settled into its conclusion, with everything a revision
+ * check starts from.
+ *
+ * Every check in this section begins the same way — three fragments, one
+ * conclusion — so that what a check does *afterwards* is the only thing that
+ * differs between two runs. The provider is scripted for the fourth fragment
+ * too, because most of these checks go on to use it.
+ */
+async function revisionRun(
+  file: string,
+  options: {
+    readonly conclusionPolicy?: ConclusionPolicy;
+    readonly now?: () => string;
+  } = {},
+): Promise<{
+  readonly domain: Domain;
+  readonly store: ReturnType<typeof openSqliteStore>;
+  readonly conclusion: Conclusion;
+  readonly provider: ReturnType<typeof createFakeProvider>;
+}> {
+  const store = openSqliteStore(file);
+  const provider = mattersOnly([...EXAM_READINGS, EXAM_FOURTH_READING], {
+    composeConclusionByAnchor: { 好烦: { kind: 'sentence', text: EXAM_SENTENCE } },
+  });
+  const domain = createDomain({
+    store,
+    provider,
+    conclusionPolicy: options.conclusionPolicy ?? policy({ judgeTiming: 'count' }),
+    ...(options.now === undefined ? {} : { now: options.now }),
+  });
+
+  for (const body of [EXAM_FIRST, EXAM_SECOND, EXAM_THIRD]) await domain.drop(body);
+  const [conclusion] = await readConclusions(domain, 1);
+  assert.ok(conclusion !== undefined, 'the three fragments settled into one conclusion');
+  return { domain, store, conclusion, provider };
+}
+
+await check('marking a conclusion wrong keeps it and adds an overturning record beside it', async () => {
+  await withDatabase(async (file) => {
+    const { domain, store, conclusion, provider } = await revisionRun(file);
+    try {
+      const asked = provider.composed.length;
+      const correction = await domain.markConclusionWrong(conclusion.id);
+      assert.ok(correction !== null, 'there was a conclusion to reject');
+
+      assert.equal(correction.kind, 'correction', 'it is a record of the user\'s act, not a judgement');
+      assert.equal(correction.tier, null, 'and it asserts nothing, so no band applies to it');
+      assert.equal(
+        correction.text,
+        CORRECTION_LINE,
+        'the line is code\'s own — the model is never asked what the user meant',
+      );
+      assert.deepEqual(
+        checkConclusion(CORRECTION_LINE),
+        [],
+        'and it keeps the shape a conclusion has to keep',
+      );
+      assert.equal(correction.relation, 'overturn', 'how it stands to the one before it');
+      assert.equal(correction.supersedes?.id, conclusion.id, 'and it says which one it replaces');
+      assert.equal(correction.supersedes?.text, conclusion.text);
+      assert.equal(correction.softened, false, 'and there is no band for anything to be softened from');
+      assert.deepEqual(correction.support, [], 'nothing supports it: the tap is the ground');
+      assert.deepEqual(
+        [correction.mentions, correction.spanDays, correction.averageStrength],
+        [0, 0, 0],
+        'and nothing was read off any numbers for it',
+      );
+      assert.equal(provider.composed.length, asked, 'no sentence was composed for it');
+
+      // The chain only grew, and the sentence it grew away from is untouched.
+      const conclusions = await domain.listConclusions();
+      assert.equal(conclusions.length, 2, 'the old conclusion is still on the chain');
+      const [before, after] = conclusions;
+      assert.equal(before?.id, conclusion.id);
+      assert.equal(before?.text, conclusion.text, 'not rewritten');
+      assert.deepEqual(
+        before?.support.map((term) => term.text),
+        EXAM_SUPPORT,
+        'and not edited either — its evidence is what it was assembled from',
+      );
+      assert.equal(before?.supersededBy?.id, correction.id, 'the chain reads forwards too');
+      assert.equal(after?.id, correction.id, 'and the correction is the newest thing on it');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('marking the same conclusion wrong twice records one correction, not two', async () => {
+  await withDatabase(async (file) => {
+    const { domain, store, conclusion } = await revisionRun(file);
+    try {
+      const first = await domain.markConclusionWrong(conclusion.id);
+      const second = await domain.markConclusionWrong(conclusion.id);
+
+      assert.equal(second?.id, first?.id, 'the second tap is the same fact, so it is the same record');
+      assert.equal((await domain.listConclusions()).length, 2, 'and the chain did not grow again');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('marking a conclusion that does not exist is null, not an error', async () => {
+  await withDatabase(async (file) => {
+    const { domain, store } = await revisionRun(file);
+    try {
+      assert.equal(await domain.markConclusionWrong('no-such-conclusion'), null);
+      assert.equal(
+        (await domain.listConclusions()).length,
+        1,
+        'and nothing was written for it',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a correction survives a restart, and so does what it overturned', async () => {
+  await withDatabase(async (file) => {
+    const { domain, store, conclusion } = await revisionRun(file);
+    let correctionId: string | undefined;
+    try {
+      correctionId = (await domain.markConclusionWrong(conclusion.id))?.id;
+    } finally {
+      await store.close();
+    }
+
+    const reopened = openSqliteStore(file);
+    try {
+      const conclusions = await createDomain({ store: reopened }).listConclusions();
+      assert.equal(conclusions.length, 2, 'both records are on disk');
+      assert.equal(conclusions[0]?.id, conclusion.id, 'the rejected one first, as it was said');
+      assert.equal(conclusions[0]?.supersededBy?.id, correctionId, 'still overturned');
+      assert.equal(conclusions[1]?.id, correctionId);
+      assert.equal(conclusions[1]?.relation, 'overturn', 'and the relation is on disk, not in memory');
+      assert.equal(conclusions[1]?.supersedes?.id, conclusion.id);
+    } finally {
+      await reopened.close();
+    }
+  });
+});
+
+await check('a sentence added beside a conclusion is a drop, and enters the same chain', async () => {
+  await withDatabase(async (file) => {
+    const { domain, store, conclusion } = await revisionRun(file);
+    try {
+      const addition = await domain.appendToConclusion(conclusion.id, EXAM_FOURTH);
+      assert.ok(addition !== null, 'there was a conclusion to write beside');
+      assert.equal(addition.conclusion.id, conclusion.id, 'it names what it was written beside');
+      assert.equal(addition.drop.body, EXAM_FOURTH, 'the wording is kept byte for byte');
+      assert.ok(addition.drop.reply.trim().length > 0, 'and it is answered like any other drop');
+
+      await settledUntil(async () => (await domain.getDrop(addition.drop.id))?.extracted === true);
+      const drop = await domain.getDrop(addition.drop.id);
+      assert.deepEqual(
+        drop?.terms.map((term) => term.text),
+        ['期末考', '好烦'],
+        'its own terms were read out of it',
+      );
+      assert.equal((await domain.listDrops()).length, 4, 'and it is a drop in the list like any other');
+
+      // What makes it "the same chain" rather than a drop that happened to be
+      // nearby: it joined that matter, so what settles next carries on from the
+      // conclusion it was written beside.
+      const conclusions = await readConclusions(domain, 2);
+      assert.equal(conclusions.length, 2);
+      assert.equal(conclusions[1]?.relation, 'inherit');
+      assert.equal(conclusions[1]?.supersedes?.id, conclusion.id);
+      assert.ok(
+        conclusions[1]?.support.map((term) => term.text).includes('期末考'),
+        'and the new sentence is part of what the new conclusion stands on',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('writing beside a conclusion that does not exist is null, and stores nothing', async () => {
+  await withDatabase(async (file) => {
+    const { domain, store } = await revisionRun(file);
+    try {
+      assert.equal(await domain.appendToConclusion('no-such-conclusion', '其实不是这样'), null);
+      assert.equal((await domain.listDrops()).length, 3, 'no drop was written for it');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a rejected matter stops attracting fragments that merely look like it', async () => {
+  /** Drop the fourth fragment and let the invisible settling land. */
+  async function fourthFragment(domain: Domain): Promise<void> {
+    await domain.drop(EXAM_FOURTH);
+    await settleReadings(domain);
+  }
+
+  // Nothing was rejected: the fragment shares 「好烦」 with the matter, clears the
+  // ratio and joins it — which is the behaviour the rejection has to change.
+  await withDatabase(async (file) => {
+    const { domain, store, conclusion } = await revisionRun(file);
+    try {
+      await fourthFragment(domain);
+      const conclusions = await readConclusions(domain, 2);
+      assert.equal(conclusions.length, 2, 'it was read as the same matter');
+      assert.equal(conclusions[1]?.supersedes?.id, conclusion.id);
+      assert.equal((await store.listMatters()).length, 1, 'one matter, and it grew');
+    } finally {
+      await store.close();
+    }
+  });
+
+  // The same fragment, after the user said the reading was wrong. The overlap is
+  // no longer worth what it was, so the matter does not take it in.
+  await withDatabase(async (file) => {
+    const { domain, store, conclusion } = await revisionRun(file);
+    try {
+      await domain.markConclusionWrong(conclusion.id);
+      await fourthFragment(domain);
+
+      assert.equal(
+        (await domain.listConclusions()).length,
+        2,
+        'the rejected reading is not said a second time in slightly different clothes',
+      );
+      assert.equal((await store.listMatters()).length, 2, 'the fragment opened a matter of its own');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('what a rejection is worth is a value the core was given, not a fixed number', async () => {
+  await withDatabase(async (file) => {
+    const { domain, store, conclusion } = await revisionRun(file, {
+      conclusionPolicy: policy({ judgeTiming: 'count', overturnedOverlapFactor: 1 }),
+    });
+    try {
+      await domain.markConclusionWrong(conclusion.id);
+      await domain.drop(EXAM_FOURTH);
+      await settleReadings(domain);
+
+      const conclusions = await readConclusions(domain, 3);
+      assert.equal(conclusions.length, 3, 'with the dampening at 1 the matter takes it in again');
+      assert.equal(conclusions[2]?.supersedes?.id, conclusions[1]?.id);
+      assert.equal((await store.listMatters()).length, 1, 'still the one matter');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('after a rejection, the next sentence about that matter speaks one band softer', async () => {
+  /**
+   * A matter over sixteen days, its conclusion rejected, and a note written
+   * beside it that carries two words of its own.
+   *
+   * The note is written beside the conclusion rather than merely dropped, so
+   * that both runs reach the same matter whether or not the rejection is in
+   * force — what a check compares here is the **band**, not the attachment.
+   */
+  async function seeded(
+    file: string,
+    bandDrop: number,
+  ): Promise<{
+    readonly domain: Domain;
+    readonly store: ReturnType<typeof openSqliteStore>;
+    readonly conclusions: readonly Conclusion[];
+  }> {
+    const store = openSqliteStore(file);
+    const clock = simulatedClock('2026-09-01T09:00:00.000Z');
+    const note = '期末考和提纲格式，还是那两件事';
+    const provider = mattersOnly(
+      [
+        ...EXAM_READINGS,
+        // Two terms of its own, and no feeling of its own: nothing links them to
+        // the anchor, which is what keeps the matter out of the strong band.
+        [note, ['期末考', '提纲格式'], null],
+      ],
+      { composeConclusionByAnchor: { 好烦: { kind: 'sentence', text: EXAM_SENTENCE } } },
+    );
+    const domain = createDomain({
+      store,
+      provider,
+      conclusionPolicy: policy({ judgeTiming: 'count', overturnedBandDrop: bandDrop }),
+      now: clock.now,
+    });
+
+    await domain.drop(EXAM_FIRST);
+    clock.advanceDays(1);
+    await domain.drop(EXAM_SECOND);
+    clock.advanceDays(15);
+    await domain.drop(EXAM_THIRD);
+    const [settled] = await readConclusions(domain, 1);
+    assert.ok(settled !== undefined);
+
+    await domain.markConclusionWrong(settled.id);
+    clock.advanceDays(1);
+    assert.ok((await domain.appendToConclusion(settled.id, note)) !== null);
+
+    // Three records either way — the rejected conclusion, the correction, and
+    // what the note settled into. What the two runs differ on is the band.
+    const conclusions = await readConclusions(domain, 3);
+    assert.equal(conclusions.length, 3, 'the note settled into the chain it was written beside');
+    return { domain, store, conclusions };
+  }
+
+  // The rule switched off: the same seven terms over seventeen days earn the
+  // medium band, which is what the step is doing rather than what the numbers were.
+  await withDatabase(async (file) => {
+    const { domain, store, conclusions } = await seeded(file, 0);
+    try {
+      const newest = conclusions[conclusions.length - 1];
+      assert.equal(newest?.tier, 'medium', 'the numbers earn the medium band');
+      assert.equal(newest?.text, `${EXAM_SENTENCE}。`, 'and nothing hedges it further');
+      assert.equal(newest?.softened, false, 'so nothing was softened, and the record does not say otherwise');
+      assert.equal((await domain.listConclusions()).length, 3);
+    } finally {
+      await store.close();
+    }
+  });
+
+  await withDatabase(async (file) => {
+    const { store, conclusions } = await seeded(file, 1);
+    try {
+      assert.equal(conclusions.length, 3, 'the rejected one, the correction, and what came after');
+      const newest = conclusions[2];
+      assert.equal(newest?.tier, 'weak', 'one band softer than the numbers alone would earn');
+      assert.equal(newest?.text, `我不太确定：${EXAM_SENTENCE}。`);
+      assert.equal(
+        newest?.softened,
+        true,
+        'and the record says so, so the band and the numbers beside it cannot tell two stories',
+      );
+      assert.equal(
+        newest?.supersedes?.id,
+        conclusions[1]?.id,
+        'and it carries on from the correction, because that is where the matter stands',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('the product\'s own note of what the user did cannot itself be rejected', async () => {
+  await withDatabase(async (file) => {
+    const { domain, store, conclusion } = await revisionRun(file);
+    try {
+      const correction = await domain.markConclusionWrong(conclusion.id);
+      assert.ok(correction !== null);
+
+      // A correction is a fact about the user, not a reading of them: there is
+      // nothing in it to disagree with, so nothing is written for one. Refused by
+      // the domain rather than by the page, so no caller can reach it.
+      assert.equal(
+        await domain.markConclusionWrong(correction.id),
+        null,
+        'there is nothing in a correction to reject',
+      );
+      assert.equal(
+        (await domain.listConclusions()).length,
+        2,
+        'and the chain did not grow a record about a record',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a correction whose target is gone is still readable', async () => {
+  await withDatabase(async (file) => {
+    const { domain, store, conclusion } = await revisionRun(file);
+    try {
+      const correction = await domain.markConclusionWrong(conclusion.id);
+      assert.ok(correction !== null);
+
+      // The one edge ticket 09 left open for this ticket: deleting a conclusion
+      // sets `supersedes` to null rather than leaving a pointer at nothing. Built
+      // by hand because no path through the domain removes a target while its
+      // correction survives — which is exactly why the reading has to be pinned
+      // rather than assumed.
+      await store.deleteConclusion(conclusion.id);
+
+      const conclusions = await domain.listConclusions();
+      assert.equal(conclusions.length, 1, 'the correction is still on the chain');
+      const [stranded] = conclusions;
+      assert.equal(stranded?.id, correction.id);
+      assert.equal(stranded?.text, CORRECTION_LINE, 'saying what it said');
+      assert.equal(stranded?.relation, 'overturn', 'with the relation it was written under');
+      assert.equal(stranded?.supersedes, null, 'and no pointer at something that is no longer there');
     } finally {
       await store.close();
     }

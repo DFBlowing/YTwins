@@ -507,7 +507,8 @@ body {
 
 /* The portrait and the conclusion chain (05). Its own section below the links,
    because a conclusion is not about one drop either: it is what the whole
-   accumulation added up to. Read-only by design — there is nothing to press. */
+   accumulation added up to. The only things to press are the two light ones
+   ticket 10 added, and they sit on the record they are about. */
 .portrait {
   margin-top: 2.5rem;
 }
@@ -576,6 +577,76 @@ body {
   margin: 0.6rem 0 0;
   padding: 0;
   list-style: none;
+}
+
+/* A correction (10) is not a judgement: it records what the user did to the
+   sentence above it. Drawn as the chain's own annotation rather than as another
+   finding — muted, and indented under the thing it is about. */
+.conclusion-correction {
+  border-left-color: var(--ink-soft);
+  margin-left: 1.25rem;
+}
+
+/* The two light things the user may do to a conclusion (10). Deliberately small
+   and quiet: they are corrections, not controls, and a portrait that looked like
+   a form would be a portrait the user has been asked to maintain. */
+.conclusion-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.6rem 0 0;
+}
+
+.conclusion-wrong,
+.conclusion-note-open,
+.conclusion-note-send {
+  padding: 0.25rem 0.7rem;
+  font: inherit;
+  font-size: 0.8rem;
+  color: var(--ink-soft);
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.conclusion-wrong:hover,
+.conclusion-note-open:hover,
+.conclusion-note-send:hover {
+  color: var(--ink);
+  border-color: var(--accent);
+}
+
+.conclusion-wrong:disabled,
+.conclusion-note-send:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.conclusion-note {
+  display: flex;
+  flex: 1 1 100%;
+  gap: 0.5rem;
+  align-items: flex-end;
+}
+
+.conclusion-note-input {
+  flex: 1 1 auto;
+  padding: 0.45rem 0.6rem;
+  font: inherit;
+  font-size: 0.85rem;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  resize: vertical;
+}
+
+.conclusion-note-line {
+  flex: 1 1 100%;
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--ink-soft);
 }
 
 .empty,
