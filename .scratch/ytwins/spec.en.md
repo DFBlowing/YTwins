@@ -304,6 +304,23 @@ reply is"), not storage-shaped ones (no tables, no id assembly, no SQL). At mini
   > band is mapped from the three numbers above, and at the surfacing moment code picks one of that band's own openings
   > to put in front of the sentence. The cooldown's **record** (`surfacing_`) becomes an entity with it. The full
   > account is in [`issues/06`](./issues/06-surfacing.en.md) under `## Comments`.
+  > **Corrected 2026-09-17 (when 11 landed)**: **asking directly** is not a second channel but the same moment's other
+  > trigger — `requestSurfacing()` without a `dropId` — so the cooldown and the per-turn cap are one set by
+  > construction and the two can never each produce an item in the same turn. When the user asks, and the material can
+  > bring **two or more** conclusions together, they are assembled into one **answer** (`answerFloor`, 2 by default and
+  > only ever stricter — one conclusion is not a smaller answer), at most `answerLimit` of them (4 by default), taking
+  > the **newest** ones because the question is what the user is like *lately*; the result carries **which conclusions**
+  > it was made of and the terms behind them. The wording still comes from the one mapping: the three numbers are read
+  > as sets (union of terms, sum of mentions, furthest span, mean connection strength) and spoken through 05's band
+  > function and 06's opening table — the **union**, because that union is the support the page lists beside the
+  > sentence, so the band and the numbers next to it cannot tell two stories. Ticket 10's step still applies: if any of
+  > the conclusions brought together was itself stepped down for a matter the user rejected, the answer steps down with
+  > it (`softened` travels with the result and the page says so), because an answer may not speak more firmly than the
+  > thing it rests on. When there is no answer to give — fewer than two sayable right now, or a provider
+  > that cannot write it — nothing is forced and nothing goes silent: the moment falls back to surfacing the one
+  > conclusion there is. The cooldown records **one row per conclusion the answer used** (reusing `surfacing_`, no
+  > schema change), so "already heard" holds for the question and for a drop alike. Full account in
+  > [`issues/11`](./issues/11-answer-on-request.en.md) under `## Comments`.
 - **Cascade delete**: two steps — preview the number of affected conclusions and state it explicitly, then execute per
   the user's choice; storage enforces it with foreign-key cascades so no orphans remain, and the text of a deleted
   drop no longer appears in any recall result.

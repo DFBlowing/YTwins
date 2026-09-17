@@ -221,6 +221,12 @@ type RecallResult =
  * Mirrors the domain's union, so the page cannot render a line without having
  * established that one exists — and cannot confuse "there was nothing to say this
  * time" (ordinary) with "the question could not be put to the material at all".
+ *
+ * Two things may come back, and the page draws them apart rather than treating
+ * one as a variant of the other: a **surfaced** conclusion, which is the one line
+ * a drop gets, and an **answered** one, which is several conclusions the user
+ * asked for assembled into a single sentence. Both carry the band and the numbers
+ * its wording was read off, so "why did it say that" reads the same for either.
  */
 type SurfacingResult =
   | {
@@ -233,6 +239,20 @@ type SurfacingResult =
       readonly spanDays: number;
       readonly averageStrength: number;
       readonly surfacedAt: string;
+    }
+  | {
+      readonly kind: 'answered';
+      readonly text: string;
+      readonly tier: 'weak' | 'medium' | 'strong';
+      /** Whether the band was stepped down because one of them was marked wrong. */
+      readonly softened: boolean;
+      /** Every conclusion it was assembled from, oldest first. Never fewer than two. */
+      readonly conclusions: readonly ConclusionRef[];
+      readonly support: readonly NamedTerm[];
+      readonly mentions: number;
+      readonly spanDays: number;
+      readonly averageStrength: number;
+      readonly answeredAt: string;
     }
   | {
       readonly kind: 'none';
@@ -333,9 +353,12 @@ const surfaceReply = mustFind<HTMLParagraphElement>('#surface-reply');
 const surfaceAsk = mustFind<HTMLButtonElement>('#surface-ask');
 const surfaceMiss = mustFind<HTMLParagraphElement>('#surface-miss');
 const surfaceResult = mustFind<HTMLElement>('#surface-result');
+const surfaceLabel = mustFind<HTMLParagraphElement>('#surface-label');
 const surfaceText = mustFind<HTMLParagraphElement>('#surface-text');
 const surfaceWhy = mustFind<HTMLParagraphElement>('#surface-why');
 const surfaceSupport = mustFind<HTMLUListElement>('#surface-support');
+const surfaceConclusionsLabel = mustFind<HTMLParagraphElement>('#surface-conclusions-label');
+const surfaceConclusions = mustFind<HTMLUListElement>('#surface-conclusions');
 
 /** How many times to ask whether a fresh drop has been read, and how often. */
 const POLL_ATTEMPTS = 40;
@@ -1300,7 +1323,10 @@ async function askToSurface(dropId?: string): Promise<SurfacingResult | null> {
 async function surfaceAfterDrop(dropId: string): Promise<SurfacingResult | null> {
   let result = await askToSurface(dropId);
   for (let attempt = 0; attempt < SURFACE_GRACE_POLLS; attempt += 1) {
-    if (result === null || result.kind === 'surfaced') return result;
+    // Only a zero answer carries a reason, and only one of the reasons is worth
+    // asking about again. A drop is never answered with an assembled one — that
+    // is the question's own path — but the page does not have to assume it.
+    if (result === null || result.kind !== 'none') return result;
     if (result.reason !== 'nothing-to-say') return result;
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
     result = await askToSurface(dropId);
@@ -1336,8 +1362,22 @@ function renderSurfacing(result: SurfacingResult | null): void {
     return;
   }
 
+  // What came back is either one conclusion or several brought together, and the
+  // page says which: a label that called an assembled answer "浮出来的这一条"
+  // would hide the one thing that makes it an answer — that it rests on more than
+  // the sentence in front of it.
+  const assembled = result.kind === 'answered' ? result.conclusions : [];
+  surfaceLabel.textContent = result.kind === 'answered' ? '把几条汇成的一句' : '浮出来的这一条';
   surfaceText.textContent = result.text;
-  surfaceWhy.textContent = `为什么这么说：${whySpoken(result)}`;
+  // The numbers were left exactly as they were and the band was stepped down, so
+  // the step is the one thing that has to be said out loud — otherwise the band
+  // and the numbers beside it would tell two stories (ticket 10's reading, which
+  // an answer inherits because it rests on those conclusions).
+  const why = `为什么这么说：${whySpoken(result)}`;
+  surfaceWhy.textContent =
+    result.kind === 'answered' && result.softened
+      ? `${why}（其中一条你标过不对，语气退了一档）`
+      : why;
   surfaceSupport.replaceChildren(
     ...result.support.map((term) => {
       const chip = document.createElement('li');
@@ -1346,6 +1386,18 @@ function renderSurfacing(result: SurfacingResult | null): void {
       return chip;
     }),
   );
+  // Where an answer came from, in the portrait's own words, so it can be read
+  // against the conclusions it was made of rather than taken on trust.
+  surfaceConclusions.replaceChildren(
+    ...assembled.map((conclusion) => {
+      const item = document.createElement('li');
+      item.className = 'surfaced-conclusion';
+      item.textContent = conclusion.text;
+      return item;
+    }),
+  );
+  surfaceConclusionsLabel.hidden = assembled.length === 0;
+  surfaceConclusions.hidden = assembled.length === 0;
   surfaceResult.hidden = false;
 }
 

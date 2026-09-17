@@ -73,6 +73,20 @@
  * path with one thing said in advance: it belongs to **that** conclusion's matter,
  * because the user put it there.
  *
+ * Ticket 11 gives the visible moment its second shape. A drop that carries a
+ * feeling is answered with the one line the material settled into, but a user who
+ * asks directly is asking what the product makes of them, and when it can bring
+ * several conclusions together it says **one answer** assembled from them rather
+ * than one of them again. It is the same moment — the same look, the same
+ * cooldown, the same one-line-per-turn cap — and the same promise about what may
+ * be said: the wording is banded by numbers read as sets (union of terms, sum of
+ * mentions, furthest span, mean strength), the uncertainty is written in by the
+ * band's own opening, and what is handed to the provider is nothing but the
+ * user's own conclusions and their own words. When there is no answer to assemble
+ * — fewer than two conclusions are sayable, or none could be written — the moment
+ * shows the one line it would have shown anyway: nothing is dressed up, and
+ * nobody who asked a direct question is met with silence.
+ *
  * @module domain/core
  */
 
@@ -151,6 +165,7 @@ import type {
   StoredTerm,
 } from './storage.ts';
 import {
+  ANSWER_INSTRUCTIONS,
   DEFAULT_SURFACING_POLICY,
   isSameTopic,
   surfacingLine,
@@ -161,12 +176,13 @@ import {
 const REPLY_ATTEMPTS = 2;
 
 /**
- * How many times a provider is asked to put a matter into a sentence.
+ * How many times a provider is asked for one banded sentence.
  *
- * The same shape as `REPLY_ATTEMPTS`, for the same reason: a sentence that broke
- * a rule is asked for once more, told what it broke. A second failure is not a
- * third attempt — the matter simply has not been spoken about yet, and the next
- * look may do better.
+ * One attempt, one retry — the same for a matter's sentence and for the answer
+ * assembled from several. A sentence that broke a rule is asked for once more,
+ * told what it broke; a second failure is not a third attempt, because the
+ * product would rather say nothing (or fall back to a line it already has) than
+ * keep asking until something passes.
  */
 const CONCLUSION_ATTEMPTS = 2;
 
@@ -968,36 +984,34 @@ export function createDomain(options: DomainCoreOptions): Domain {
   }
 
   /**
-   * Ask the provider for a matter's sentence, and take it only if it passes.
+   * Ask the provider for one banded sentence, and take it only if it passes.
    *
-   * The one retry is told which rules the first attempt broke, because a model
-   * asked to try again at random is being asked to guess luckily. A second
-   * failure returns null, and null means **silence**: the matter has not been
-   * spoken about yet, and the next look may do better. There is no safe line
-   * here to fall back to — an invented sentence would be a judgement the product
-   * does not have, which is worse than saying nothing.
+   * The shape **every** sentence the product bands is composed in — a matter's,
+   * and the answer assembled from several of them — because the promise is the
+   * same either way: one retry, told which rules the first attempt broke, and
+   * **silence** rather than a sentence nobody could write.
+   *
+   * Being told matters: a model asked to try again at random is being asked to
+   * guess luckily. And a second failure is not a third attempt, because there is
+   * nothing safe to fall back to here — an invented sentence would be a judgement
+   * the product does not have, which is worse than saying nothing. What the
+   * caller does with null is its own business: a matter stays pending and the next
+   * look may do better, while an answer falls back to a line that already exists.
+   *
+   * @param ask - one attempt, told what the previous one broke.
+   * @returns the sentence, or null when none could be composed.
    */
-  async function composeClaim(
-    anchor: string,
-    terms: readonly string[],
-    tier: ConclusionTier,
+  async function composeChecked(
+    ask: (violations: readonly string[] | undefined) => Promise<string>,
   ): Promise<string | null> {
-    if (provider === undefined) return null;
-
     let violations: readonly string[] | undefined;
     for (let attempt = 0; attempt < CONCLUSION_ATTEMPTS; attempt += 1) {
       let candidate: string;
       try {
-        candidate = (
-          await provider.composeConclusion({
-            anchor,
-            terms,
-            tier,
-            instructions: CONCLUSION_INSTRUCTIONS,
-            ...(violations === undefined ? {} : { violations }),
-          })
-        ).text;
+        candidate = await ask(violations);
       } catch {
+        // Down, refusing, or blowing up. Asking again would only spend a second
+        // call on a provider that cannot answer, so this is the silence.
         return null;
       }
 
@@ -1006,6 +1020,34 @@ export function createDomain(options: DomainCoreOptions): Domain {
       violations = broken;
     }
     return null;
+  }
+
+  /**
+   * Ask the provider for a matter's sentence, and take it only if it passes.
+   *
+   * Null means **silence**: the matter has not been spoken about yet, and the next
+   * look may do better.
+   */
+  async function composeClaim(
+    anchor: string,
+    terms: readonly string[],
+    tier: ConclusionTier,
+  ): Promise<string | null> {
+    const composing = provider;
+    if (composing === undefined) return null;
+
+    return composeChecked(
+      async (violations) =>
+        (
+          await composing.composeConclusion({
+            anchor,
+            terms,
+            tier,
+            instructions: CONCLUSION_INSTRUCTIONS,
+            ...(violations === undefined ? {} : { violations }),
+          })
+        ).text,
+    );
   }
 
   /**
@@ -1334,6 +1376,196 @@ export function createDomain(options: DomainCoreOptions): Domain {
       return { kind: 'none', reason: sayable === 0 ? 'nothing-to-say' : 'cooldown' };
     }
     return { kind: 'ready', candidates: [first, ...rest] };
+  }
+
+  /**
+   * What an answer was assembled from, and the numbers its wording is read off.
+   *
+   * The same three numbers a single conclusion carries, read from the several it
+   * brought together: every wording behind them, how often that material was
+   * raised, how far back it goes and how tightly it is tied together. The gate
+   * they are read through is the very same one (`tierOf`), which is what "措辞
+   * 强弱由可解释数值映射得出" and "与浮现共用同一套映射" both mean here.
+   */
+  interface AssembledAnswer {
+    /** The conclusions brought together, oldest first. */
+    readonly conclusions: readonly ShowableConclusion[];
+    /** Every wording behind them, in the user's own words and in the order first said. */
+    readonly support: readonly StoredTerm[];
+    /** How many times the material behind them had been raised, added up. */
+    readonly mentions: number;
+    /** How far back that material goes, in whole days. */
+    readonly spanDays: number;
+    /** How tightly it is tied together: the mean of the conclusions' own strengths. */
+    readonly averageStrength: number;
+    /** The band the combined numbers earn. */
+    readonly earned: ConclusionTier;
+    /**
+     * The band actually written, which is `earned` unless one of the conclusions
+     * was itself stepped down for a matter the user rejected (ticket 10).
+     */
+    readonly tier: ConclusionTier;
+  }
+
+  /**
+   * Bring the eligible conclusions together, and read the numbers off them.
+   *
+   * Three readings, each the natural one for a set rather than a single matter:
+   * the **union** of the wordings behind them, because that is what an answer
+   * stands on; the **sum** of how often they were raised, because all of that
+   * material is behind this one sentence; the **longest** span, because how far
+   * back the answer reaches is the furthest of them; and the **mean** of their
+   * connection strengths, because that is what averaging over several things
+   * means. None of them is invented here — every one is a number a conclusion
+   * already carried, and the page still shows them beside the sentence.
+   *
+   * @param conclusions - what was gathered, oldest first.
+   * @param terms - every term by id, read once.
+   * @returns the material behind the answer and the band it earns.
+   */
+  function assembleAnswer(
+    conclusions: readonly ShowableConclusion[],
+    terms: ReadonlyMap<string, StoredTerm>,
+  ): AssembledAnswer {
+    const support: StoredTerm[] = [];
+    const seen = new Set<string>();
+    let mentions = 0;
+    let span = 0;
+    let strength = 0;
+
+    for (const { conclusion } of conclusions) {
+      mentions += conclusion.mentions;
+      span = Math.max(span, conclusion.spanDays);
+      strength += conclusion.averageStrength;
+      for (const termId of conclusion.supportTermIds) {
+        if (seen.has(termId)) continue;
+        seen.add(termId);
+        const term = terms.get(termId);
+        // A wording the store can no longer name is left out rather than shown
+        // blank, the same reading `conclusionViews` takes: a judgement resting on
+        // a prop nobody can read is not one to put in front of the user.
+        if (term !== undefined) support.push(term);
+      }
+    }
+
+    const averageStrength = conclusions.length === 0 ? 0 : strength / conclusions.length;
+    const earned = tierOf(support.length, span, averageStrength, conclusionPolicy);
+    // A conclusion assembled after the user marked that matter wrong was already
+    // written one band softer, and an answer that rests on it may not speak more
+    // firmly than the thing it rests on — the same step, for the same reason, as
+    // `settle` applies to the matter itself. The numbers are **not** adjusted:
+    // they are what they are, and a step read off them that then steps down is
+    // explained by saying so on the page.
+    const stepped = conclusions.some((chosen) => chosen.conclusion.softened)
+      ? conclusionPolicy.overturnedBandDrop
+      : 0;
+    return {
+      conclusions,
+      support,
+      mentions,
+      spanDays: span,
+      averageStrength,
+      earned,
+      tier: softerTier(earned, stepped),
+    };
+  }
+
+  /**
+   * Ask the provider for the one sentence that brings several conclusions
+   * together.
+   *
+   * Composed through `composeChecked`, so it keeps the same shape a matter's
+   * sentence does. Null is not a failure the user sees — the caller falls back to
+   * the one line the moment would have shown anyway.
+   *
+   * What is handed over is the user's own material and nothing else: the
+   * sentences the product assembled for their matters, and the words those
+   * sentences stand on. That is the structural half of "只可能出自我自己数据".
+   *
+   * @param answer - the conclusions, and the words and band behind them.
+   * @returns the sentence, or null when none may be shown.
+   */
+  async function answerSentence(answer: AssembledAnswer): Promise<string | null> {
+    const composing = provider;
+    if (composing === undefined) return null;
+
+    return composeChecked(
+      async (violations) =>
+        (
+          await composing.composeAnswer({
+            // The sentences without their bands' frames: those frames are the
+            // product's own wording about how firmly it may speak, and an answer
+            // is not a place to read one back out of a string.
+            conclusions: answer.conclusions.map((chosen) => chosen.claim),
+            terms: answer.support.map((term) => term.text),
+            tier: answer.tier,
+            instructions: ANSWER_INSTRUCTIONS,
+            ...(violations === undefined ? {} : { violations }),
+          })
+        ).text,
+    );
+  }
+
+  /**
+   * The **answer** the user asked for, or null when there is none to give.
+   *
+   * Null is an ordinary answer to "can this be assembled" and never a failure the
+   * caller has to report: the moment falls back to the one conclusion it would
+   * otherwise have shown, which is what the user got before this existed. There
+   * are two ordinary ways to get there — fewer conclusions than an answer needs,
+   * and a sentence nobody could compose — and neither may become an invented
+   * answer.
+   *
+   * @param candidates - everything the moment could show, oldest first.
+   * @param at - the moment being judged, ISO-8601.
+   * @returns the answer, or null when the moment should show one line instead.
+   */
+  async function answerFor(
+    candidates: readonly ShowableConclusion[],
+    at: string,
+  ): Promise<SurfacingResult | null> {
+    // An answer is several conclusions by definition (`CONTEXT.md`, 答案): one is
+    // not a smaller answer, it is the restatement this moment is not allowed to
+    // make. So two is the floor whatever the policy says, and the dial can only
+    // raise it.
+    const floor = Math.max(2, surfacingPolicy.answerFloor);
+    const limit = Math.max(floor, surfacingPolicy.answerLimit);
+    // The newest few, back in the order they were assembled. What the user asked
+    // is what they are like **lately**, and one sentence cannot honestly hold
+    // everything the portrait has ever said.
+    const gathered = [...candidates].reverse().slice(0, limit).reverse();
+    if (gathered.length < floor) return null;
+
+    const terms = new Map((await store.listTerms()).map((term) => [term.id, term]));
+    const answer = assembleAnswer(gathered, terms);
+    const sentence = await answerSentence(answer);
+    if (sentence === null) return null;
+
+    // Written down before it is handed back, so the cooldown is a fact about the
+    // user from the moment they have read the line — and every conclusion the
+    // answer drew on is recorded, because every one of them has now been heard.
+    for (const chosen of answer.conclusions) {
+      await store.recordSurfacing(chosen.conclusion.id, at);
+    }
+
+    return {
+      kind: 'answered',
+      text: surfacingLine(answer.tier, sentence, random()),
+      tier: answer.tier,
+      // The step is a fact about **this moment**, so it travels with the answer
+      // rather than being derived from a chain that may have changed since: the
+      // numbers beside it are unchanged, and the page says why the band is lower.
+      softened: answer.tier !== answer.earned,
+      conclusions: answer.conclusions.map((chosen) => ({
+        id: chosen.conclusion.id,
+        text: chosen.conclusion.text,
+      })),
+      support: answer.support.map(toNamedTerm),
+      mentions: answer.mentions,
+      spanDays: answer.spanDays,
+      averageStrength: answer.averageStrength,
+      answeredAt: at,
+    };
   }
 
   /** Assemble one drop with its items and terms, or null when there is none. */
@@ -1897,6 +2129,25 @@ export function createDomain(options: DomainCoreOptions): Domain {
       const at = now();
       const ready = await readySurfacings(at);
       if (ready.kind === 'none') return ready;
+      const candidates = ready.candidates;
+
+      // The asked-for **answer**: several conclusions brought together into one
+      // sentence rather than one of them shown. Only a question is answered this
+      // way — a drop gets the one line that belongs to the moment it just made —
+      // and it is the same moment otherwise, which is what keeps the cooldown and
+      // the one-line-per-turn cap true of both: they cannot each produce
+      // something in a turn they share.
+      //
+      // Null means "there is no answer to give", and what follows is the line the
+      // moment would have shown anyway. That fallback is deliberate rather than a
+      // second-best: with one conclusion there is nothing to assemble, and with
+      // one nobody could put into words, showing the thing itself beats both
+      // dressing a single conclusion up as an answer and falling silent at
+      // someone who just asked a direct question.
+      if (dropId === undefined) {
+        const answered = await answerFor(candidates, at);
+        if (answered !== null) return answered;
+      }
 
       // The dice, and the whole of the mystery: whether this turn is used at all,
       // which of the things that could be said is said, and which of that band's
@@ -1906,7 +2157,6 @@ export function createDomain(options: DomainCoreOptions): Domain {
       if (dropId !== undefined && random() >= surfacingPolicy.surfaceChance) {
         return { kind: 'none', reason: 'held-back' };
       }
-      const candidates = ready.candidates;
       // A roll below 1 always names one of them; the fallback keeps a caller that
       // breaks that contract from turning "show one" into "show none".
       const chosen = candidates[Math.floor(random() * candidates.length)] ?? candidates[0];
@@ -1989,7 +2239,7 @@ export function createDomain(options: DomainCoreOptions): Domain {
 
       let answer: string;
       try {
-        answer = (await provider.composeAnswer({ question, records: sources, now })).answer;
+        answer = (await provider.composeRecallAnswer({ question, records: sources, now })).answer;
       } catch {
         return { kind: 'unavailable' };
       }

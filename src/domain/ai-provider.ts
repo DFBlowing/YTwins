@@ -13,6 +13,9 @@
  * thing settling needs a model for — putting a matter that has crossed the
  * threshold into a sentence — and gives `extract` the **anchor**: which of the
  * terms it read carries the feeling or the decision the fragment is about.
+ * Ticket 11 adds the other end of the visible moment: bringing several
+ * conclusions together into the one **answer** the user asked for, which is the
+ * only call here that is handed more than one thing the product worked out.
  *
  * Note what settling does *not* put here: whether a matter may speak, when the
  * invisible look happens, and how firmly the sentence is allowed to speak. Those
@@ -227,8 +230,18 @@ export interface ParseQuestionResult {
   readonly matchText: readonly string[];
 }
 
-/** A request to compose the answer to one question. */
-export interface ComposeAnswerRequest {
+/**
+ * A request to compose the reply to one question about the user's **records**.
+ *
+ * Deliberately named for **recall** and not for the product's word **answer**
+ * (`CONTEXT.md`, 追溯): what comes back from here is a **fact** — the user's own
+ * words, read back to them — and the glossary is explicit that what recall hands
+ * back is not to be called an 答案. The one thing on this port that *is* an answer
+ * is `composeAnswer` below, and the two are kept apart in their names for exactly
+ * the reason they are kept apart in the product: one states what the user said,
+ * the other states what the product makes of them.
+ */
+export interface ComposeRecallAnswerRequest {
   /** The question as typed. */
   readonly question: string;
   /**
@@ -249,8 +262,8 @@ export interface ComposeAnswerRequest {
   readonly now: string;
 }
 
-/** The composed answer. */
-export interface ComposeAnswerResult {
+/** The composed reply to a question about the records. */
+export interface ComposeRecallAnswerResult {
   /**
    * The answer sentence.
    *
@@ -307,6 +320,64 @@ export interface ComposeConclusionResult {
    * The domain adds the frame and rejects a blank: a conclusion rendered as an
    * empty line beside its supporting terms would be the product claiming
    * something it cannot say.
+   */
+  readonly text: string;
+}
+
+/**
+ * Several conclusions the provider is asked to bring together into one sentence.
+ *
+ * This is the asked-for **answer** (`CONTEXT.md`, 答案), and it is the one call
+ * on this port that is not about a single piece of material: what it is handed is
+ * what the product has already worked out about the user, across several matters,
+ * and what it owes back is one sentence that could only have come from that.
+ *
+ * Everything here is the user's own material — the sentences assembled out of
+ * their fragments, and the wordings those sentences stand on. Nothing generic is
+ * sent, which is the structural half of "只可能出自这个用户自己的数据": a model
+ * handed only these cannot answer with something that would fit anyone else.
+ */
+export interface ComposeAnswerRequest {
+  /**
+   * The sentences to bring together, oldest first.
+   *
+   * The sentences the product assembled — without the band's frames, exactly as
+   * `composeConclusion` handed them over — because those frames are the
+   * product's own wording about how firmly it may speak, and an answer is not a
+   * place to read them back out of a string.
+   */
+  readonly conclusions: readonly string[];
+  /**
+   * Every wording behind those sentences, oldest first, in the user's own words.
+   *
+   * The same material a conclusion is composed from, laid out as the union of
+   * what supports the several of them: what an answer may be about is what the
+   * user actually said, and a model given categories instead of words can only
+   * answer in categories.
+   */
+  readonly terms: readonly string[];
+  /**
+   * The band the combined numbers earned.
+   *
+   * Context for the wording, not a licence to choose a tone: the opening that
+   * carries the strength is written by code afterwards (`surfacing.ts`), so the
+   * sentence itself is written the same way whatever band it is in.
+   */
+  readonly tier: ConclusionTier;
+  /** The rules this sentence must obey, in the product's own words. */
+  readonly instructions: readonly string[];
+  /** Which rules the previous attempt broke, when this is the one retry. */
+  readonly violations?: readonly string[];
+}
+
+/** The provider's one sentence about several conclusions. */
+export interface ComposeAnswerResult {
+  /**
+   * The sentence, without the band's opening.
+   *
+   * The domain adds the opening and rejects a blank: an answer rendered as an
+   * empty line beside the conclusions it was drawn from would be the product
+   * claiming something it cannot say.
    */
   readonly text: string;
 }
@@ -388,6 +459,27 @@ export interface AiProvider {
   composeConclusion(request: ComposeConclusionRequest): Promise<ComposeConclusionResult>;
 
   /**
+   * Bring several conclusions together into the one **answer** the user asked
+   * for.
+   *
+   * Called only when ordinary code has already decided that an answer is
+   * possible: the user asked, at least a few conclusions are eligible, and none
+   * of them is inside the cooldown. The same tolerance applies as everywhere else
+   * on this port — throwing, hanging or returning a sentence that breaks the
+   * rules costs this turn's answer and nothing else, because what the moment
+   * falls back to is a line that already exists rather than a worse one invented
+   * here.
+   *
+   * Deliberately told nothing about *how* to answer: how firmly the product may
+   * speak is read off numbers and written by code (`surfacing.ts`), so the model
+   * supplies the words and never the register.
+   *
+   * @param request - the conclusions, the words behind them, and the rules.
+   * @returns the sentence, before the band's opening is applied.
+   */
+  composeAnswer(request: ComposeAnswerRequest): Promise<ComposeAnswerResult>;
+
+  /**
    * Work out what to look for when the user asks about their records.
    *
    * The same tolerance applies as everywhere else on this port: a provider that
@@ -401,14 +493,14 @@ export interface AiProvider {
   parseQuestion(request: ParseQuestionRequest): Promise<ParseQuestionResult>;
 
   /**
-   * Turn the records that matched into an answer sentence.
+   * Turn the records that matched into a reply sentence.
    *
    * Only ever called when something matched: with no evidence there is nothing
    * to compose, and the domain says so itself rather than asking a model to
    * phrase an absence it cannot check.
    *
    * @param request - the question, the matching records, and the moment to answer as of.
-   * @returns the answer text. A blank answer is rejected by the domain.
+   * @returns the reply text. A blank one is rejected by the domain.
    */
-  composeAnswer(request: ComposeAnswerRequest): Promise<ComposeAnswerResult>;
+  composeRecallAnswer(request: ComposeRecallAnswerRequest): Promise<ComposeRecallAnswerResult>;
 }

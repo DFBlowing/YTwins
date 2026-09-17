@@ -525,9 +525,13 @@ export type SurfacingMiss =
  * result**: "nothing this time" and "here is the one line" are different
  * outcomes and a caller should have to have decided which it got.
  *
- * Every number beside the sentence is one its wording was read off — the same
- * three a conclusion carries — so "why did it say that back then" stays
- * answerable about the moment it was said, not only about the portrait.
+ * Two things may come back, and they are the two things the moment is for
+ * (`CONTEXT.md`, 浮现 and 答案): a single conclusion shown as it was assembled,
+ * which is what a drop that carries a feeling gets, and an **answer** assembled
+ * from several of them, which is what the user gets when they ask. Both carry the
+ * band their wording was read off and the numbers behind it — the same three a
+ * conclusion carries, read the same way — so "why did it say that back then"
+ * stays answerable about the moment it was said, not only about the portrait.
  */
 export type SurfacingResult =
   | {
@@ -561,6 +565,78 @@ export type SurfacingResult =
       readonly surfacedAt: string;
     }
   | {
+      /**
+       * Several conclusions were brought together into one **answer**.
+       *
+       * This is the asked-for observation (`CONTEXT.md`, 答案): it comes out of
+       * what the product has already worked out across several matters, which is
+       * why it is one sentence that could only have been said about this user,
+       * and never a restatement of a single conclusion.
+       */
+      readonly kind: 'answered';
+      /**
+       * The answer, in the wording its band owns.
+       *
+       * Written the way a surfacing is, by the same code: the provider supplies
+       * the sentence, the band supplies the opening, and the uncertainty is
+       * therefore structural rather than something looked for in the string. Like
+       * a conclusion's own line, the sentences it was assembled from are left
+       * untouched in the portrait.
+       */
+      readonly text: string;
+      /** The band its wording was read off, from the combined numbers below. */
+      readonly tier: ConclusionTier;
+      /**
+       * Whether that band was written one step below what the numbers earned.
+       *
+       * True where one of the conclusions it was assembled from had itself been
+       * stepped down — a matter the user marked wrong speaks one band softer
+       * (ticket 10), and an answer resting on such a conclusion may not speak
+       * more firmly than the thing it rests on. It travels with the result rather
+       * than being inferred later, for the same reason it does on a conclusion:
+       * the numbers above are unchanged, so without this the page would show a
+       * band and a set of numbers that tell two stories.
+       */
+      readonly softened: boolean;
+      /**
+       * The conclusions it was assembled from, oldest first.
+       *
+       * All of them, not one: the whole promise of an answer is that "only you
+       * could have been told this" can be checked, and checking it means being
+       * able to read back every sentence it drew on.
+       */
+      readonly conclusions: readonly ConclusionRef[];
+      /**
+       * Every word behind those conclusions, in the user's own words, oldest
+       * first and deduplicated.
+       *
+       * The union rather than the per-conclusion lists: what the user asked was
+       * what the product makes of them, and what it is made of is the set of
+       * things they actually said.
+       */
+      readonly support: readonly NamedTerm[];
+      /**
+       * How many times the material behind it had been raised, added up.
+       *
+       * The sum and not one matter's count: an answer stands on several, and
+       * naming one matter's number beside all of them would explain the wording
+       * with a fraction of the evidence it was read off.
+       */
+      readonly mentions: number;
+      /**
+       * How far back the material behind it goes, in whole days.
+       *
+       * The longest of the conclusions' spans, which is what "how long has this
+       * been accumulating" means for an answer, and what the band's gate is read
+       * against.
+       */
+      readonly spanDays: number;
+      /** How tightly that material is tied together: the mean of the conclusions' own strengths. */
+      readonly averageStrength: number;
+      /** When it was said, as an ISO-8601 string. */
+      readonly answeredAt: string;
+    }
+  | {
       /** Nothing was shown, which is a normal outcome and not a failure. */
       readonly kind: 'none';
       /** Which of the ordinary reasons applies. */
@@ -579,9 +655,12 @@ export interface SurfacingOptions {
    * The drop that just arrived, when a drop is what raised the moment.
    *
    * Omitted when the user asked directly. The two are **not** the same trigger:
-   * a drop has to carry a feeling to be a moment at all, and whether this turn is
-   * used is rolled for; a question is always put to the material and always
-   * answered, and is never rolled for.
+   * a drop has to carry a feeling to be a moment at all, whether this turn is
+   * used is rolled for, and what it gets is the one line the material settled
+   * into; a question is always put to the material and always answered, is never
+   * rolled for, and is answered with several conclusions assembled into one
+   * **answer** when there are several to bring together (ticket 11). What they
+   * share is the moment itself — one look, one cooldown, one line per turn.
    */
   readonly dropId?: string;
 }
@@ -741,6 +820,15 @@ export interface Upcoming {
  * say the same kind of thing as anything else they type. Neither is a rating, a
  * like or a bulk answer — that is the line this product does not cross, because
  * a portrait the user maintains is a portrait they have been made to work on.
+ *
+ * Ticket 11 opens the asked-for **answer**, and it does not open an operation:
+ * asking is the other trigger of the surfacing moment above, so it arrives
+ * through `requestSurfacing` with nothing to say about which drop raised it. What
+ * it adds is a shape of result — several conclusions assembled into one sentence
+ * that could only have come from this user's material, with the conclusions and
+ * the words behind them travelling with it — and a fallback that is a promise in
+ * its own right: with too little to assemble, the one line there is is shown as
+ * itself, so the answer is never a restatement dressed up and never a silence.
  */
 export interface Domain {
   /**
@@ -937,11 +1025,20 @@ export interface Domain {
    * feeling, and a question the user asked. Every other drop is not a moment, and
    * the answer is `not-a-moment` rather than silence-by-accident.
    *
-   * What it returns is at most one conclusion, and **zero is a normal result** —
-   * the material may not have settled into anything sayable, the same topic may
-   * have been shown inside the last seven days, or the product may simply not use
-   * this turn. None of those is an error, and the page shows nothing for any of
-   * them: surfacing never pushes.
+   * What it returns is at most one thing, and **zero is a normal result** — the
+   * material may not have settled into anything sayable, the same topic may have
+   * been shown inside the last seven days, or the product may simply not use this
+   * turn. None of those is an error, and the page shows nothing for any of them:
+   * surfacing never pushes.
+   *
+   * The two triggers are **one moment**, not two channels, and they differ in
+   * exactly one way: a drop gets the immediate line, while a question — the user
+   * standing in front of the product and asking what it makes of them — gets an
+   * **answer** assembled from several conclusions when there are several to bring
+   * together (`CONTEXT.md`, 答案), falling back to the one line when there is
+   * only one thing to say. Sharing the moment is what keeps the cooldown and the
+   * one-line-per-turn cap true of both: they can never each produce something in
+   * the same turn, because they are the same turn.
    *
    * Both triggers judge **on the spot** before answering, because the moment is
    * the user's and what they see may not be stale — the last few fragments have
@@ -949,10 +1046,12 @@ export interface Domain {
    * rolled for, while a question is always put to the material and never rolled
    * for.
    *
-   * Every surfacing is recorded, so the cooldown holds across a restart.
+   * Every surfacing is recorded, so the cooldown holds across a restart. An
+   * answer records every conclusion it drew on, because every one of them has now
+   * been heard.
    *
    * @param options - the drop that raised the moment, or nothing when the user asked.
-   * @returns the one conclusion shown, or the ordinary reason there is none.
+   * @returns the one thing shown, or the ordinary reason there is none.
    */
   requestSurfacing(options?: SurfacingOptions): Promise<SurfacingResult>;
 

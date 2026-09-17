@@ -17,7 +17,10 @@
  * so a link's existence and strength are numbers the check chose. Ticket 05 adds
  * the one thing settling needs a model for: a sentence for a matter that has
  * crossed the threshold, scripted per feeling so a check can tell which feelings
- * the domain decided a matter was about.
+ * the domain decided a matter was about. Ticket 11 adds the asked-for **answer**
+ * as a script of its own, so a check can make the assembly fail while every
+ * single matter still composes — which is what "an answer nobody could compose
+ * did not become an invented one" is asserted with.
  *
  * @module domain/fake-provider
  */
@@ -28,6 +31,8 @@ import type {
   ComposeAnswerResult,
   ComposeConclusionRequest,
   ComposeConclusionResult,
+  ComposeRecallAnswerRequest,
+  ComposeRecallAnswerResult,
   EmbedRequest,
   EmbedResult,
   ExtractRequest,
@@ -124,6 +129,16 @@ export type ComposeConclusionScript =
   | FailureScript
   | { readonly kind: 'sentence'; readonly text: string };
 
+/**
+ * What the fake should say when several conclusions are brought together.
+ *
+ * Its own script rather than a second use of `ComposeConclusionScript`, because
+ * the two calls answer different questions and a check has to be able to fail
+ * one without failing the other — which is how "the answer could not be composed,
+ * and one real line stood in its place" is pinned.
+ */
+export type AnswerScript = FailureScript | { readonly kind: 'sentence'; readonly text: string };
+
 /** Every script this fake understands, so the failure guard can see them all. */
 export type AnyScript =
   | RespondScript
@@ -132,7 +147,8 @@ export type AnyScript =
   | ComposeScript
   | EmbedScript
   | JudgeLinkScript
-  | ComposeConclusionScript;
+  | ComposeConclusionScript
+  | AnswerScript;
 
 /** Configure the fake: a default, plus per-body overrides. */
 export interface FakeProviderScript {
@@ -161,7 +177,7 @@ export interface FakeProviderScript {
   /** What to make of a question. Omitting it means every question yields no cues. */
   readonly parseQuestionFallback?: ParseQuestionScript;
   readonly parseQuestionByQuestion?: Readonly<Record<string, ParseQuestionScript>>;
-  /** How to answer, once records have been found. */
+  /** How to reply to a question, once records have been found. */
   readonly composeFallback?: ComposeScript;
   /**
    * Observe each composition as it happens.
@@ -170,7 +186,7 @@ export interface FakeProviderScript {
    * about composition is usually *what the composer was handed* — the records,
    * the pinned moment — and those only exist per call.
    */
-  readonly onCompose?: (request: ComposeAnswerRequest) => void;
+  readonly onCompose?: (request: ComposeRecallAnswerRequest) => void;
   /**
    * What to encode a text as. Keyed by the text itself, so the same term always
    * gets the same vector and the resulting similarity is a number the check
@@ -211,6 +227,20 @@ export interface FakeProviderScript {
    * only exist per call.
    */
   readonly onComposeConclusion?: (request: ComposeConclusionRequest) => void;
+  /**
+   * What to say when several conclusions are brought together. Omitting it makes
+   * the call **fail**, like the other compositions: an answer is a judgement, and
+   * a fake that defaulted to one would be inventing it.
+   */
+  readonly answerFallback?: AnswerScript;
+  /**
+   * What to say on the first, second, … attempt for one assembly.
+   *
+   * The last entry repeats, so "always this" is a one-element script. Needed
+   * because the domain asks again when the first sentence breaks the rules, and a
+   * fake that answered the same thing twice could not tell the two paths apart.
+   */
+  readonly answerAttempts?: readonly AnswerScript[];
 }
 
 /** One pair put to `judgeLink`, as the fake saw it. */
@@ -233,6 +263,8 @@ export interface FakeProvider extends AiProvider {
   readonly judged: readonly JudgedPair[];
   /** Every matter the domain asked it to put into a sentence, in order. */
   readonly composed: readonly ComposeConclusionRequest[];
+  /** Every assembly the domain asked it for, in order. */
+  readonly answers: readonly ComposeAnswerRequest[];
 }
 
 /**
@@ -315,7 +347,7 @@ function runParseQuestion(script: ParseQuestionScript | undefined): Promise<Pars
   return Promise.resolve({ matchText: script.matchText });
 }
 
-function runCompose(script: ComposeScript | undefined): Promise<ComposeAnswerResult> {
+function runCompose(script: ComposeScript | undefined): Promise<ComposeRecallAnswerResult> {
   if (script === undefined) {
     // Unscripted composition **fails** rather than answering. Composing is the
     // one call whose output is a sentence presented to the user as fact, so a
@@ -348,6 +380,22 @@ function runComposeConclusion(script: ComposeConclusionScript | undefined): Prom
 }
 
 /**
+ * What an unscripted answer reads as.
+ *
+ * Nothing, and it **fails** rather than answering, for the same reason
+ * composition does: an answer is the product's own judgement drawn from the
+ * user's material, and a fake that defaulted to a placeholder would be putting
+ * words in its mouth that no check ever scripted.
+ */
+function runComposeAnswer(script: AnswerScript | undefined): Promise<ComposeAnswerResult> {
+  if (script === undefined) {
+    return Promise.reject(new Error('no answer script: the fake will not invent an answer'));
+  }
+  if (isFailure(script)) return fail(script);
+  return Promise.resolve({ text: script.text });
+}
+
+/**
  * Build a fake provider.
  *
  * @param script - the default behaviour and any per-body overrides.
@@ -360,10 +408,13 @@ export function createFakeProvider(script: FakeProviderScript = {}): FakeProvide
   const embedded: string[] = [];
   const judged: JudgedPair[] = [];
   const composed: ComposeConclusionRequest[] = [];
+  const answers: ComposeAnswerRequest[] = [];
   /** How many times each body has been answered, which picks its attempt script. */
   const answered = new Map<string, number>();
   /** How many times each matter has been asked about, for the same reason. */
   const concluded = new Map<string, number>();
+  /** How many times an assembly has been asked for, for the same reason. */
+  let assembled = 0;
   return {
     seen,
     read,
@@ -371,6 +422,7 @@ export function createFakeProvider(script: FakeProviderScript = {}): FakeProvide
     embedded,
     judged,
     composed,
+    answers,
     // Deliberately NOT `async`. An `async` method would turn the `throw` script
     // into a rejected promise, and the whole point of that script is to hand the
     // domain a genuinely synchronous throw — the shape that a naive
@@ -399,7 +451,9 @@ export function createFakeProvider(script: FakeProviderScript = {}): FakeProvide
         script.parseQuestionByQuestion?.[request.question] ?? script.parseQuestionFallback,
       );
     },
-    composeAnswer(request: ComposeAnswerRequest): Promise<ComposeAnswerResult> {
+    composeRecallAnswer(
+      request: ComposeRecallAnswerRequest,
+    ): Promise<ComposeRecallAnswerResult> {
       script.onCompose?.(request);
       return runCompose(script.composeFallback);
     },
@@ -414,6 +468,15 @@ export function createFakeProvider(script: FakeProviderScript = {}): FakeProvide
       return runComposeConclusion(
         scripted ?? script.composeConclusionByAnchor?.[request.anchor] ?? script.composeConclusionFallback,
       );
+    },
+    composeAnswer(request: ComposeAnswerRequest): Promise<ComposeAnswerResult> {
+      answers.push(request);
+      // The last entry repeats, so "always this" is a one-element script.
+      const attempts = script.answerAttempts;
+      const scripted =
+        attempts === undefined ? undefined : attempts[Math.min(assembled, attempts.length - 1)];
+      assembled += 1;
+      return runComposeAnswer(scripted ?? script.answerFallback);
     },
     // Not `async`, for the same reason as `respond`: `fail` may throw
     // synchronously, and hiding that behind a promise would make the fake

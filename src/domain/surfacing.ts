@@ -43,11 +43,18 @@
  *    used at all, which of the eligible conclusions is shown, and which of that
  *    band's openings the line carries. A question the user asked is never rolled
  *    for.
+ *  - **An asked-for answer is several conclusions in one, and it is the same
+ *    moment.** When the user asks directly, the product may bring a few
+ *    conclusions together into one sentence (`CONTEXT.md`, 答案) instead of
+ *    showing one of them — the same moment, the same cooldown, the same dice on
+ *    the wording and never on whether to answer at all. What may be assembled,
+ *    and how many, is `answerFloor` / `answerLimit` below; the sentence itself is
+ *    the provider's, and the opening in front of it is the same band's.
  *
  * @module domain/surfacing
  */
 
-import { bareSentence, overlapOf } from './conclusions.ts';
+import { MAX_SENTENCE_CHARACTERS, bareSentence, overlapOf } from './conclusions.ts';
 import type { ConclusionTier } from './interface.ts';
 
 /**
@@ -91,6 +98,32 @@ export interface SurfacingPolicy {
    * lowering it is the whole reason the visible moment carries the mystery.
    */
   readonly surfaceChance: number;
+  /**
+   * How many conclusions have to come together before there is an **answer**.
+   *
+   * Two, and the number is the feature rather than a calibration: an answer is
+   * those several conclusions assembled into one sentence (`CONTEXT.md`, 答案),
+   * and with fewer than two there is nothing to assemble — a single conclusion
+   * dressed up as an assembled one would be the restatement the ticket rules out.
+   * Below it the asked-for moment falls back to showing the one thing there is,
+   * which is what the user already got before this ticket existed.
+   *
+   * A value rather than a constant for the same reason as every other dial here:
+   * what the fallback is worth is a judgement about the product, and a check has
+   * to be able to pin a different one. It can only be **stricter** than two — a
+   * lower value is read as two, because "several" is what an answer is.
+   */
+  readonly answerFloor: number;
+  /**
+   * How many conclusions are brought together at most.
+   *
+   * Not a finding, a working limit: what the user asked for is *one* sentence,
+   * and twenty things the product noticed cannot honestly be pressed into one.
+   * The newest ones are taken, because the question is what the user is like
+   * **lately** — the oldest material is still in the portrait, and a sentence
+   * that led with it would describe someone who has moved on.
+   */
+  readonly answerLimit: number;
 }
 
 /** The policy in force until something says otherwise. */
@@ -98,6 +131,8 @@ export const DEFAULT_SURFACING_POLICY: SurfacingPolicy = {
   cooldownMs: 7 * 86_400_000,
   topicOverlapRatio: 0.5,
   surfaceChance: 1,
+  answerFloor: 2,
+  answerLimit: 4,
 };
 
 /**
@@ -172,3 +207,29 @@ export function surfacingLine(tier: ConclusionTier, claim: string, roll: number)
   const opening = openings[index] ?? openings[0];
   return `${opening}${bareSentence(claim)}。`;
 }
+
+/**
+ * The rules an **answer**'s sentence must obey, in the product's own words.
+ *
+ * Deliberately not `CONCLUSION_INSTRUCTIONS`: those are written for one matter
+ * and tell the model to follow the newest feeling inside it, which is the wrong
+ * instruction for a sentence that has to hold several matters at once. What is
+ * left is the part both share — one Chinese sentence, in the uncertain register,
+ * with no hedge of its own (the band's opening is written by code) — plus the one
+ * thing an answer must never be: something that would be true of anybody.
+ *
+ * The last rule is the whole product's reason for existing stated as an
+ * instruction, and it is only half of the guarantee: the other half is that
+ * nothing but the user's own material is sent with this request, so a model
+ * handed only these words has nothing generic to reach for.
+ *
+ * The length is `MAX_SENTENCE_CHARACTERS` rather than a number written out here,
+ * because `checkConclusion` enforces the same one: a limit stated twice is a
+ * limit that can be stated wrong.
+ */
+export const ANSWER_INSTRUCTIONS: readonly string[] = [
+  '只写一句中文陈述句，说人话；不用「用户」「画像」「数据」这类词，也不要写成报告或分析。',
+  '这是判断，不是事实：用不确定的措辞（「你似乎…」这类），不要写成断言。',
+  '只从这里给的事实出发，不要说出放在任何人身上都成立的话；不复述原话，不提问，不给建议。',
+  `不加「我不太确定」这类整句缓冲语，语气强弱由外层决定；不超过 ${MAX_SENTENCE_CHARACTERS} 字，不以问号结尾。`,
+];

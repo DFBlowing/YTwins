@@ -35,6 +35,12 @@
  * reply rules are the domain's, and this is only the sentence a stand-in would
  * have offered.
  *
+ * Ticket 11 adds the other two fragments act three can drop, and the asked-for
+ * **answer**. Both are needed for the feature to be reachable in the browser: an
+ * answer is several conclusions brought together, so the demo has to be able to
+ * grow a second matter — the stand-in's four preset sentences were already there,
+ * and two of them now have fragments that reach them.
+ *
  * Nothing here is intelligence, and nothing here is the product. Replacing this
  * module with a real provider is ticket 12's whole job; the domain core does not
  * change when that happens, which is the point of the port.
@@ -46,6 +52,7 @@ import type {
   AiProvider,
   ComposeAnswerRequest,
   ComposeConclusionRequest,
+  ComposeRecallAnswerRequest,
 } from '../domain/ai-provider.ts';
 import { createFakeProvider } from '../domain/fake-provider.ts';
 
@@ -114,6 +121,43 @@ const DEMO_CLAIM_BY_FEELING: Readonly<Record<string, string>> = {
 };
 
 /**
+ * The other two fragments act three can drop, each opening a matter of its own.
+ *
+ * Preset for the same reason `DEMO_DROP` is: a stand-in that guessed at a reading
+ * would be inventing one, and the demo has to be repeatable. They exist because
+ * an **answer** needs more than one conclusion to assemble, and one repeated
+ * fragment can only ever make one — see this module's header.
+ *
+ * Each yields three terms rather than two, and that is not decoration: below
+ * three the matter can only **catch** a feeling instead of concluding anything
+ * (`ConclusionPolicy.claimFloor`), so a two-word fragment would give the demo a
+ * second matter that never produces a second thing to assemble.
+ *
+ * `DEMO_GUITAR`'s text is also quoted by act three's placeholder in
+ * `index.html` — the one place in this repo where a preset string is written
+ * twice, because a placeholder cannot be fetched from the store. If the two
+ * drift apart, what breaks is the demo's second matter (a line typed by hand
+ * reads as nothing), never the product; change both together.
+ */
+export const DEMO_GUITAR = '最近老想着学吉他，也在看琴行的帖子，周末想去试一节体验课';
+export const DEMO_SLEEP = '这周总是睡不好，白天也没精神，晚上躺下又清醒';
+
+/**
+ * What the stand-in reads those two as.
+ *
+ * The anchors are the feelings the preset sentences above are keyed by — the
+ * same shape the demo's first fragment has, where 好烦 is a term of its own and
+ * the thing the accumulation gathers around.
+ */
+const DEMO_SECOND_READINGS: Readonly<Record<string, { readonly terms: readonly string[]; readonly anchor: string }>> = {
+  [DEMO_GUITAR]: {
+    terms: ['想学吉他', '琴行的帖子', '体验课'],
+    anchor: '想学吉他',
+  },
+  [DEMO_SLEEP]: { terms: ['睡不好', '没精神', '躺下又清醒'], anchor: '睡不好' },
+};
+
+/**
  * Compose the demo's conclusion sentence.
  *
  * Exported so the preset material is visible in one place, and so the stand-in's
@@ -168,13 +212,40 @@ function outlinePhrase(days: number | null): string {
 }
 
 /**
- * Compose the demo answer.
+ * Compose the demo's reply to a question about the **records**.
  *
  * Exported so it can be exercised on its own, and so the preset facts are
- * visible in one place rather than buried in a script object.
+ * visible in one place rather than buried in a script object. Named for recall
+ * rather than for the product's word 答案, which belongs to the composer below
+ * (`CONTEXT.md`, 追溯).
+ */
+export function composeDemoRecallAnswer(request: ComposeRecallAnswerRequest): string {
+  return `${DEMO_GRADING}${outlinePhrase(daysUntil(request.now, DEMO_DUE))}`;
+}
+
+/**
+ * Compose the demo's asked-for **answer**.
+ *
+ * Built out of the user's own words rather than written out as a fixed line, and
+ * that is the point of the demo: what comes back names things only this user
+ * said, which is exactly the property the real provider is supposed to have. A
+ * stand-in with a canned sentence would show the shape of the feature and hide
+ * the one thing worth looking at.
+ *
+ * The words are taken until the sentence is long enough to say something and
+ * short enough that the domain's own check still passes it: a stand-in whose
+ * answer was rejected for length would fall back to a single line, and the demo
+ * would look like the feature was not there.
  */
 export function composeDemoAnswer(request: ComposeAnswerRequest): string {
-  return `${DEMO_GRADING}${outlinePhrase(daysUntil(request.now, DEMO_DUE))}`;
+  const named: string[] = [];
+  for (const term of request.terms) {
+    const quoted = `「${term}」`;
+    if (named.length >= 3 || named.join('').length + quoted.length > 24) break;
+    named.push(quoted);
+  }
+  if (named.length === 0) return '你最近说的那几件事，好像是连在一起的';
+  return `你反复提到的${named.join('')}，好像是连在一起的`;
 }
 
 /**
@@ -195,6 +266,18 @@ export function createDemoProvider(): AiProvider {
           anchor: DEMO_ANCHOR,
         },
       },
+      // The two fragments act three may drop. Emotional, because that is what
+      // they are: the demo's second matter is raised by saying the same thing
+      // three times, and each of those is a moment the product speaks after.
+      ...Object.fromEntries(
+        Object.entries(DEMO_SECOND_READINGS).map(([body, reading]) => [
+          body,
+          {
+            kind: 'read',
+            reading: { inputType: 'emotion', items: [], terms: reading.terms, anchor: reading.anchor },
+          },
+        ]),
+      ),
     },
     parseQuestionByQuestion: {
       [DEMO_QUESTION]: { kind: 'match', matchText: DEMO_MATCH_TEXT },
@@ -206,11 +289,14 @@ export function createDemoProvider(): AiProvider {
 
   return {
     ...fake,
-    composeAnswer(request: ComposeAnswerRequest) {
-      return Promise.resolve({ answer: composeDemoAnswer(request) });
+    composeRecallAnswer(request: ComposeRecallAnswerRequest) {
+      return Promise.resolve({ answer: composeDemoRecallAnswer(request) });
     },
     composeConclusion(request: ComposeConclusionRequest) {
       return Promise.resolve({ text: composeDemoConclusion(request) });
+    },
+    composeAnswer(request: ComposeAnswerRequest) {
+      return Promise.resolve({ text: composeDemoAnswer(request) });
     },
   };
 }

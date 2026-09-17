@@ -111,24 +111,45 @@ _最后更新：2026-09-17_
   `tsc` 全绿、`vite build` 成功、`check-workspace` clean，并已由 `/code-review` 两轴审过、按结论修订
   （退档与数值对不上、修正自身可被否、被推翻那条没了之后的读法三处，详见 ticket 10 的 `## Comments`）。
   `CONTEXT.md` 的「结论链」已补上「只增不改 + 被否之后更难归到一起」。
-- **01–10 全部完成**；`11`–`13` 仍是 `Status: ready-for-agent`。
+- **11 已实现**，`Status: ready-for-human`：**主动询问 → 一次观察（答案）**。**没有新开通道**：
+  06 做的 `requestSurfacing(options?)` 就是那个 moment，11 在它里面加「由多条小结论汇集」那一层，
+  所以「共用同一套冷却与条数上限、同一轮不会各出一条」是结构保证而不是约定。**只有「问」会拿到答案**
+  （带 `dropId` 的投递仍只浮它自己那一句，否则等于用关于过去的观察去回答刚出口的情绪）。
+  「多条」的硬下限是 2（`SurfacingPolicy.answerFloor`，只能更严不能更松），一次最多汇 `answerLimit`（4）条、
+  取**最新**的（问的是「最近」）；三个数按集合读（词条并集 / 次数求和 / 跨度取最远 / 强度取均值），
+  再交给 05 的 `tierOf` 与 06 的 `surfacingLine` —— **同一张开头表**，所以不确定语气仍是结构给的。
+  **「只可能出自我自己数据」是结构保证**：新增端口方法 `composeAnswer`，交给它的只有用户自己的
+  小结论原话 + 用户自己的词条 + 档位，没有通用素材可抄；材料不够时**根本不问** provider（测试断言
+  `provider.answers` 为空）。凑不出答案（当下可说的不足两条，或 provider 写不出来）时**退回浮现**：
+  把仅有的那一条原样浮出来 —— 不硬凑成「答案」，也不在用户直接开口问的时候沉默。
+  冷却按**答案用到的每一条**各记一行（复用 `surfacing_`，**无 schema 改动、无迁移**）。
+  10 的退档也走到这里：汇进来的那条退过档（`softened`）时答案同样退一档，并随结果返回、由页面说明。
+  152/152 领域测试（新增 10 条）、新增 `tools/e2e-ticket-11.mjs` 6/6、02–06 与 08/09/10 的 e2e 全绿、
+  `tsc` 全绿、`vite build` 成功、`check-workspace` clean、真实服务器用 demo 素材手工过了一遍
+  （第一幕那句 ×3 + 吉他那条 ×3 → 一条弱档答案，2 条来处、7 个词条、再问即 `cooldown`）。
+  **demo 素材补了两条**（`demo-provider.ts` 的 `DEMO_GUITAR` / `DEMO_SLEEP`，各读 **3** 个词条 ——
+  少于 `claimFloor` 的那件事只能承接、永远汇不成答案，第一版写 2 个词条时真实服务器上答案仍是退路）。
+  `/code-review` 两轴已过：**改了**端口词汇倒置（追溯那端改名 `composeRecallAnswer`，`composeAnswer` 归 11）、
+  两处重复（抽出 `composeChecked`、字数上限插值）、答案不认 10 的退档、e2e 的空断言、两个旋钮没人钉；
+  **保留并写明理由**的是退路形状、band 按并集读、demo 素材（垂直切片）—— 逐条见 ticket 11 的 `## Comments`。
+- **01–11 全部完成**；`12`–`13` 仍是 `Status: ready-for-agent`。
 
 这个仓库的第一个 effort slug 是 `ytwins`（`.scratch/ytwins/`、`docs/ytwins/`）。将来另开 effort 时再取新 slug。
 
 ## 下一步
 
-1. **`10` 已完成（2026-09-17）** —— 下一张按顺序是 **`11`**（主动询问 → 一次观察/答案）。
+1. **`11` 已完成（2026-09-17）** —— 下一张按顺序是 **`12`**（真实 provider：云端 LLM + 本地 embedding）。
    **严格按编号顺序串行推进**，见下「串行推进（2026-09-15 更正）」。
-   11 要站在 10 留下的两件事上：① 一条被否过的 matter 里，最新记录是那条 `correction`，而
-   `readySurfacings()` 只挑 `claim` —— 所以「一条 matter 的最新记录不一定是判断」这件事，11 按 matter
-   汇集「多条小结论」时必须自己处理；② `ConclusionKind` 现在有三档（`claim` / `catch` / `correction`），
-   凡是要读结论的地方都别只想到前两档。
-2. **11 与 06 共用同一个 moment。** 11（主动询问 → 一次观察/答案）显式写着与浮现共用同一套冷却与条数上限、
-   不会在同一轮里各出一条 —— 06 已经把那个 moment 做成 `requestSurfacing()`（不带 `dropId` 就是主动询问），
-   11 要加的是「由**多条**小结论汇集」这一层，而不是另开一个通道。
-3. spec 里留了一处**只有人能做**的事：申请并填入云端 LLM 的 API key（服务端环境变量文件）。别把它写进
-   agent 的实现 ticket，必要时用 `/wizard` 生成交互脚本。它只在 **12**（真实 provider）之前必须就位 ——
-   01–11 全用假 provider，不需要 key。
+   12 要站在 11 留下的两件事上：① 端口现在有 **8 个**方法（`respond` / `extract` / `embed` / `judgeLink` /
+   `composeConclusion` / `composeAnswer` / `parseQuestion` / `composeRecallAnswer`），真实实现要**逐个**落地，
+   `composeAnswer` 的输入只有用户自己的结论与词条（服务端不要再往里塞通用人设，那会当场推翻 11 的保证）；
+   注意 `composeRecallAnswer` 是**追溯**那端（答的是**事实**），别与 `composeAnswer`（**答案**，答的是**判断**）
+   混起来 —— 这一对名字是 11 按 `CONTEXT.md` 摆正的；② demo 的预置素材现在是**两条额外投递片段**
+   （`DEMO_GUITAR` / `DEMO_SLEEP`），换真实 provider 时它们连同 `demo-provider.ts` 一起退场，
+   别把预置素材当成领域数据搬进 `src/domain/`。
+2. spec 里留了一处**只有人能做**的事：申请并填入云端 LLM 的 API key（服务端环境变量文件）。别把它写进
+   agent 的实现 ticket，必要时用 `/wizard` 生成交互脚本。它在 **12** 动手之前必须就位 —— 01–11 全用假 provider，
+   不需要 key。
 
 ## 在 01 里踩到的坑（下一张 ticket 会再遇到）
 

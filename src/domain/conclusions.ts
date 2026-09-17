@@ -386,14 +386,19 @@ export function frameFor(tier: ConclusionTier, base: string): string {
 const MAX_SENTENCES = 1;
 
 /**
- * How long a conclusion's own sentence may be, before the band's frame.
+ * How long any sentence the product bands may be, before its opening is added.
  *
- * Shorter than a reply's allowance on purpose: a reply answers something the
- * user just said, while a conclusion is a sentence out of nowhere, and the
- * longer it is the more it sounds like a verdict. The frame adds at most twelve
- * characters on top, which is why the limit is measured before it.
+ * Shorter than a reply's allowance on purpose: a reply answers something the user
+ * just said, while a conclusion — or an answer assembled from several of them —
+ * is a sentence out of nowhere, and the longer it is the more it sounds like a
+ * verdict. The band's opening adds at most twelve characters on top, which is why
+ * the limit is measured before it.
+ *
+ * Exported because it is not only enforced here: the rules each provider request
+ * carries state the same limit in words, and a number written out twice is one
+ * that can drift from the check that enforces it.
  */
-const MAX_CHARACTERS = 48;
+export const MAX_SENTENCE_CHARACTERS = 48;
 
 /**
  * The rules `checkConclusion` can find broken.
@@ -422,7 +427,7 @@ export const CONCLUSION_INSTRUCTIONS: readonly string[] = [
   '这是判断，不是事实：用不确定的措辞（「你似乎…」这类），不要写成断言。',
   '句子跟着这件事里最新那句情绪或决定走，不要用最早那句的样子去描述现在。',
   '不复述投递原文，不提问，不给建议，不给人格下定义，不用亲昵称呼。',
-  '不加「我不太确定」这类整句缓冲语，语气强弱由外层决定；不超过 48 字，不以问号结尾。',
+  `不加「我不太确定」这类整句缓冲语，语气强弱由外层决定；不超过 ${MAX_SENTENCE_CHARACTERS} 字，不以问号结尾。`,
 ];
 
 /**
@@ -451,7 +456,7 @@ export function checkConclusion(text: string): readonly ConclusionViolation[] {
     .map((sentence) => sentence.trim())
     .filter((sentence) => sentence.length > 0);
   if (sentences.length > MAX_SENTENCES) broken.add('too-many-sentences');
-  if ([...trimmed.replace(/\s+/gu, '')].length > MAX_CHARACTERS) broken.add('too-long');
+  if ([...trimmed.replace(/\s+/gu, '')].length > MAX_SENTENCE_CHARACTERS) broken.add('too-long');
   if (/[？?]/u.test(trimmed)) broken.add('question');
 
   return [...broken];

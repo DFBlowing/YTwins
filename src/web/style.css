@@ -714,6 +714,32 @@ body {
   list-style: none;
 }
 
+/* An answer (11) is several conclusions in one sentence, so it shows where it
+   came from: the portrait's own lines, indented under the sentence they were
+   gathered into. Read-only — this is a list of what it rests on, not a set of
+   things to act on. */
+.surfaced-conclusions-label {
+  margin: 0.9rem 0 0;
+  font-size: 0.8rem;
+  color: var(--ink-soft);
+}
+
+.surfaced-conclusions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin: 0.4rem 0 0;
+  padding: 0 0 0 0.9rem;
+  border-left: 2px solid var(--line);
+  list-style: none;
+}
+
+.surfaced-conclusion {
+  font-size: 0.95rem;
+  color: var(--ink-soft);
+  word-break: break-word;
+}
+
 /* Before a drop, act three has nothing to repeat — the button and its hint are
    one line, so the hint reads as part of it rather than as an error. */
 .surface-repeat {

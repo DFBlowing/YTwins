@@ -160,15 +160,19 @@
         <p class="not-found" id="ask-unavailable" hidden>这次没能查到留档，稍后再试试。</p>
       </section>
 
-      <!-- 第三幕：浮。06 填实：情绪投递或主动询问时，浮出一条小结论。 -->
+      <!-- 第三幕：浮。06 填实：情绪投递或主动询问时，浮出一条小结论；
+           11 让主动询问在沉淀出不止一条时，把它们汇成一句答案。 -->
       <section class="act" data-act-panel="surface" hidden>
         <p class="lede">
-          在情绪投递或你主动询问时，用不确定的语气浮出一条小结论。同一件事 7 天内只浮一次，每轮最多一条。
+          在情绪投递或你主动询问时，用不确定的语气浮出一条。同一件事 7 天内只浮一次，每轮最多一条。
+          主动问「你觉得我最近怎么样」时，如果已经沉淀出不止一条，它会把几条汇成一句答案，并列出这几条。
         </p>
 
         <!--
           演示靠的是「同一件事被提起 3 次」：这里再丢一遍刚才那句（不必手打，
-          用的是这个库里的第一句原文），丢到第 3 次时浮现。
+          用的是这个库里的第一句原文），丢到第 3 次时浮现。要拿到一条**答案**
+          （多条小结论汇成一句），先把这件事丢够 3 次，再换一件事也丢 3 次
+          —— 下面输入框里给的那句是预置素材之一，它属于另一件事。
         -->
         <div class="surface-repeat">
           <button type="button" class="surface-again" id="surface-again">再丢一次第一句</button>
@@ -181,7 +185,7 @@
             class="drop-input"
             name="body"
             rows="3"
-            placeholder="也可以自己再丢一句情绪化的话，比如：今天又在改提纲，好烦"
+            placeholder="也可以自己再丢一句，比如：最近老想着学吉他，也在看琴行的帖子，周末想去试一节体验课"
             aria-label="再丢一句"
           ></textarea>
           <button type="submit" class="drop-send" id="surface-send">再丢一句</button>
@@ -196,10 +200,12 @@
         <p class="surface-miss" id="surface-miss" hidden></p>
 
         <section class="surfaced" id="surface-result" hidden>
-          <p class="surfaced-label">浮出来的这一条</p>
+          <p class="surfaced-label" id="surface-label">浮出来的这一条</p>
           <p class="surfaced-text" id="surface-text" role="status" aria-live="polite"></p>
           <p class="surfaced-why" id="surface-why"></p>
           <ul class="surfaced-support" id="surface-support"></ul>
+          <p class="surfaced-conclusions-label" id="surface-conclusions-label" hidden>它是由这几条汇成的：</p>
+          <ul class="surfaced-conclusions" id="surface-conclusions" hidden></ul>
         </section>
       </section>
     </main>

@@ -2317,6 +2317,8 @@ function surfacingPolicy(overrides: Partial<SurfacingPolicy> = {}): SurfacingPol
     cooldownMs: 7 * 86_400_000,
     topicOverlapRatio: 0.5,
     surfaceChance: 1,
+    answerFloor: 2,
+    answerLimit: 4,
     ...overrides,
   };
 }
@@ -2861,6 +2863,671 @@ await check('with the weighting off, the same two words are enough — the misfi
   // different things the same, and the user never hears the second one.
   const { second } = await surfaceSharedMatters(false);
   assert.deepEqual(second, { kind: 'none', reason: 'cooldown' });
+});
+
+console.log('\ndomain core — the answer');
+
+/**
+ * Two matters, each raised three times, in each other's words: the exam and the
+ * guitar.
+ *
+ * An **answer** is assembled from several conclusions, so every check in this
+ * section needs more than one matter to have crossed the threshold — and two
+ * that are genuinely different, which is what the distinct wordings are for.
+ * 「好烦」 and 「想学吉他」 are the feelings each matter gathers around, and they
+ * are what the fake writes a sentence per, so the two conclusions can be told
+ * apart in what the provider was handed.
+ */
+const ANSWER_EXAM_1 = '期末怎么算分，好烦';
+const ANSWER_EXAM_2 = '平时分 40% 到底怎么算，好烦';
+const ANSWER_GUITAR_1 = '最近老想着学吉他，想学吉他';
+const ANSWER_GUITAR_2 = '看了几个吉他班，想学吉他';
+const ANSWER_EXAM_READINGS: readonly AnchoredReading[] = [
+  [ANSWER_EXAM_1, ['期末怎么算分', '好烦'], '好烦'],
+  [ANSWER_EXAM_2, ['平时分 40%', '好烦'], '好烦'],
+];
+const ANSWER_GUITAR_READINGS: readonly AnchoredReading[] = [
+  [ANSWER_GUITAR_1, ['学吉他', '想学吉他'], '想学吉他'],
+  [ANSWER_GUITAR_2, ['吉他班', '想学吉他'], '想学吉他'],
+];
+const ANSWER_READINGS: readonly AnchoredReading[] = [
+  ...ANSWER_EXAM_READINGS,
+  ...ANSWER_GUITAR_READINGS,
+];
+
+/** Raise the demo's two matters, which most of the checks in this section need. */
+async function answerDrops(domain: Domain): Promise<void> {
+  await raiseThreeTimes(domain, ANSWER_READINGS);
+}
+
+/**
+ * A third matter, and one that grows again after being rejected: between them
+ * they are what the two dial checks and the band-step check need.
+ */
+const ANSWER_SLEEP_1 = '最近总是睡不好，白天没精神，晚上也睡不踏实';
+const ANSWER_SLEEP_2 = '这周还是睡不好，白天没精神';
+const ANSWER_SLEEP_READINGS: readonly AnchoredReading[] = [
+  [ANSWER_SLEEP_1, ['睡不好', '没精神', '睡不踏实'], '睡不好'],
+  [ANSWER_SLEEP_2, ['睡不好', '没精神'], '睡不好'],
+];
+const ANSWER_SLEEP_SENTENCE = '你最近好像一直没睡好';
+
+/**
+ * A second pair of matters, in words that share nothing with the first pair.
+ *
+ * Used where the check is "the same code over **different** material hands over
+ * different material": the two sets have to stay apart, which is why their
+ * wordings share nothing — the exam pair's 「好烦」 turning up here would let a
+ * fragment attach to the wrong matter and quietly make the two sets one.
+ */
+const ANSWER_NOISY_1 = '室友半夜还在打游戏，好吵';
+const ANSWER_NOISY_2 = '室友的键盘声一直响，好吵';
+const ANSWER_THESIS_1 = '论文开题还没定下来，好焦虑';
+const ANSWER_THESIS_2 = '导师又打回了一版，好焦虑';
+const ANSWER_OTHER_READINGS: readonly AnchoredReading[] = [
+  [ANSWER_NOISY_1, ['室友打游戏', '好吵'], '好吵'],
+  [ANSWER_NOISY_2, ['键盘声', '好吵'], '好吵'],
+  [ANSWER_THESIS_1, ['论文开题', '好焦虑'], '好焦虑'],
+  [ANSWER_THESIS_2, ['导师打回', '好焦虑'], '好焦虑'],
+];
+const ANSWER_OTHER_SENTENCES = {
+  好吵: { kind: 'sentence', text: '你最近好像一直被吵着' },
+  好焦虑: { kind: 'sentence', text: '你好像在为论文的事悬着' },
+} as const;
+
+/** One more fragment for the exam matter, bringing a word it has not heard. */
+const ANSWER_EXAM_3 = '期末考那部分到底考什么，好烦';
+const ANSWER_EXAM_3_READING: AnchoredReading = [ANSWER_EXAM_3, ['期末考', '好烦'], '好烦'];
+
+/** What the fake says about each matter those fragments accumulate into. */
+const ANSWER_SENTENCES = {
+  好烦: { kind: 'sentence', text: '你最近被期末压着' },
+  想学吉他: { kind: 'sentence', text: '你好像真的很想学吉他' },
+  睡不好: { kind: 'sentence', text: ANSWER_SLEEP_SENTENCE },
+} as const;
+
+/**
+ * Raise every matter a set of readings describes the way the threshold needs it:
+ * each fragment once, then every fragment after the first once more, so every
+ * matter ends up raised three times without any fragment being special.
+ *
+ * @param domain - the domain to drop into.
+ * @param readings - the fragments, and what the fake reads out of them.
+ */
+async function raiseThreeTimes(
+  domain: Domain,
+  readings: readonly AnchoredReading[],
+): Promise<void> {
+  const bodies = readings.map(([body]) => body);
+  for (const body of [...bodies, ...bodies.slice(1)]) await domain.drop(body);
+}
+
+/** What the fake says when several conclusions are brought together. */
+const ANSWER_SENTENCE = '你反复提到的那几件事，好像连在一起';
+
+/** The answered payload, or a failed assertion — no other arm reaches it. */
+function answeredOf(result: SurfacingResult): Extract<SurfacingResult, { kind: 'answered' }> {
+  assert.equal(result.kind, 'answered', `expected an answer, got ${JSON.stringify(result)}`);
+  if (result.kind !== 'answered') throw new Error('unreachable');
+  return result;
+}
+
+await check('an asked-for answer is assembled from several conclusions, not one restated', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = mattersOnly(ANSWER_READINGS, {
+        composeConclusionByAnchor: ANSWER_SENTENCES,
+        answerFallback: { kind: 'sentence', text: ANSWER_SENTENCE },
+      });
+      const domain = createDomain({
+        store,
+        provider,
+        conclusionPolicy: policy({ judgeTiming: 'count' }),
+        surfacingPolicy: surfacingPolicy(),
+        // The opening is rolled for even when the question is not, and this pins
+        // it to the weakest band's first — the same face a surfacing would take.
+        random: () => 0,
+      });
+
+      await answerDrops(domain);
+      const conclusions = await readConclusions(domain, 2);
+
+      const answer = answeredOf(await domain.requestSurfacing());
+      assert.equal(answer.text, `我不太确定：${ANSWER_SENTENCE}。`);
+      assert.equal(answer.tier, 'weak', 'said in one sitting, so it is hedged');
+      assert.deepEqual(
+        answer.conclusions.map((conclusion) => conclusion.text),
+        conclusions.map((conclusion) => conclusion.text),
+        'both conclusions it was assembled from, as the portrait words them',
+      );
+      assert.deepEqual(
+        answer.support.map((term) => term.text),
+        ['期末怎么算分', '好烦', '平时分 40%', '学吉他', '想学吉他', '吉他班'],
+        'and every word behind them, in the order the user said them',
+      );
+
+      // What the provider was handed is the user's own material and nothing
+      // else: the sentences the product assembled for their matters, and the
+      // words those sentences stand on.
+      const [asked] = provider.answers;
+      assert.deepEqual(asked?.conclusions, ['你最近被期末压着', '你好像真的很想学吉他']);
+      assert.deepEqual(asked?.terms, ['期末怎么算分', '好烦', '平时分 40%', '学吉他', '想学吉他', '吉他班']);
+      assert.deepEqual(
+        Object.keys(answer).sort(),
+        [
+          'answeredAt',
+          'averageStrength',
+          'conclusions',
+          'kind',
+          'mentions',
+          'softened',
+          'spanDays',
+          'support',
+          'text',
+          'tier',
+        ],
+        'and nothing of the scaffolding it was assembled from comes with it',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('an answer is only ever made of the user\'s own material', async () => {
+  // The same code, the same question, three data sets. One has a single thing
+  // settled; the other two have two matters each, and they are *different*
+  // matters, in different words, with different feelings behind them.
+  //
+  // What makes "an answer could only have grown out of this user's material" a
+  // structural fact rather than a hope about the model is the **handover**: what
+  // the provider is given is exactly the conclusions this store holds and exactly
+  // the words behind them, and with too little material it is given nothing at
+  // all. The two rich runs are what proves the material is read from the data
+  // rather than from the code path: same call, different sentences handed over.
+  const runs = [
+    {
+      readings: EXAM_READINGS,
+      sentences: { 好烦: { kind: 'sentence', text: EXAM_SENTENCE } } as const,
+      expected: 'surfaced',
+      settled: 1,
+      said: [] as readonly string[],
+      terms: [] as readonly string[],
+    },
+    {
+      readings: ANSWER_READINGS,
+      sentences: ANSWER_SENTENCES,
+      expected: 'answered',
+      settled: 2,
+      said: ['你最近被期末压着', '你好像真的很想学吉他'],
+      terms: ['期末怎么算分', '好烦', '平时分 40%', '学吉他', '想学吉他', '吉他班'],
+    },
+    {
+      readings: ANSWER_OTHER_READINGS,
+      sentences: ANSWER_OTHER_SENTENCES,
+      expected: 'answered',
+      settled: 2,
+      said: ['你最近好像一直被吵着', '你好像在为论文的事悬着'],
+      terms: ['室友打游戏', '好吵', '键盘声', '论文开题', '好焦虑', '导师打回'],
+    },
+  ] as const;
+
+  for (const run of runs) {
+    await withDatabase(async (file) => {
+      const store = openSqliteStore(file);
+      try {
+        const provider = mattersOnly(run.readings, {
+          composeConclusionByAnchor: run.sentences,
+          answerFallback: { kind: 'sentence', text: ANSWER_SENTENCE },
+        });
+        const domain = createDomain({
+          store,
+          provider,
+          conclusionPolicy: policy({ judgeTiming: 'count' }),
+          surfacingPolicy: surfacingPolicy(),
+          random: () => 0,
+        });
+
+        await raiseThreeTimes(domain, run.readings);
+        await readConclusions(domain, run.settled);
+
+        const result = await domain.requestSurfacing();
+        assert.equal(
+          result.kind,
+          run.expected,
+          `over ${run.settled} conclusion(s)`,
+        );
+        assert.deepEqual(
+          provider.answers.map((asked) => [...asked.conclusions]),
+          run.said.length === 0 ? [] : [run.said],
+          'the only thing ever handed over is this user\'s own sentences',
+        );
+        if (result.kind === 'answered') {
+          assert.deepEqual(
+            provider.answers[0]?.terms,
+            run.terms,
+            'and their own words, nothing generic beside them',
+          );
+          assert.deepEqual(
+            result.conclusions.map((conclusion) => conclusion.id).length,
+            run.said.length,
+            'and the answer cites every one of them',
+          );
+        }
+      } finally {
+        await store.close();
+      }
+    });
+  }
+});
+
+await check('an answer is worded in the band its numbers earn, by the same mapping a surfacing uses', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    const clock = simulatedClock('2026-09-01T09:00:00.000Z');
+    try {
+      const provider = mattersOnly(ANSWER_READINGS, {
+        composeConclusionByAnchor: ANSWER_SENTENCES,
+        answerFallback: { kind: 'sentence', text: ANSWER_SENTENCE },
+      });
+      const domain = createDomain({
+        store,
+        provider,
+        conclusionPolicy: policy({ judgeTiming: 'count' }),
+        surfacingPolicy: surfacingPolicy(),
+        now: clock.now,
+        // The same face a surfacing takes: what is pinned is which opening the
+        // band carries, and that it is rolled for rather than written by a model.
+        random: () => 0,
+      });
+
+      // The exam matter over four days, the guitar one in a sitting: the answer
+      // reaches back as far as the furthest of them, so its band is the medium
+      // one — a conclusion said in one sitting would be hedged, and this is not.
+      await domain.drop(ANSWER_EXAM_1);
+      clock.advanceDays(4);
+      await domain.drop(ANSWER_EXAM_2);
+      await domain.drop(ANSWER_EXAM_2);
+      await readConclusions(domain, 1);
+      clock.advanceDays(1);
+      await domain.drop(ANSWER_GUITAR_1);
+      await domain.drop(ANSWER_GUITAR_2);
+      await domain.drop(ANSWER_GUITAR_2);
+      await readConclusions(domain, 2);
+
+      const answer = answeredOf(await domain.requestSurfacing());
+      assert.equal(answer.tier, 'medium', 'six words over four days is not hedged by the band');
+      assert.equal(answer.text, `听起来，${ANSWER_SENTENCE}。`, 'the opening is the band\'s own');
+      assert.equal(answer.mentions, 6, 'both matters\' times, added up');
+      assert.equal(answer.spanDays, 4, 'as far back as the furthest thing behind it goes');
+      assert.equal(
+        answer.averageStrength,
+        1,
+        'the mean of the two, each being fully tied to its own feeling — said together',
+      );
+      assert.equal(
+        provider.answers[0]?.tier,
+        'medium',
+        'and the band travels with the request, as context rather than as a licence',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('an answer nobody could compose falls back to one real line, never an invented one', async () => {
+  // Two ways for the assembly to come to nothing, asserted in one place because
+  // both must end the same way: a provider that fails, and a sentence that breaks
+  // the rules twice. What is left standing is the line the moment would have shown
+  // anyway — a conclusion from the portrait, which is a real thing the product
+  // worked out — rather than a silence at someone who just asked, or worse, the
+  // rejected sentence.
+  const runs = [
+    { name: 'the call fails', script: [{ kind: 'fail', reason: 'down' }] as const },
+    {
+      name: 'the sentence breaks the rules twice',
+      script: [
+        { kind: 'sentence', text: '你为什么老是这么想？宝贝。' },
+        { kind: 'sentence', text: '你为什么老是这么想？宝贝。' },
+      ] as const,
+    },
+  ];
+
+  for (const run of runs) {
+    await withDatabase(async (file) => {
+      const store = openSqliteStore(file);
+      try {
+        const provider = mattersOnly(ANSWER_READINGS, {
+          composeConclusionByAnchor: ANSWER_SENTENCES,
+          answerAttempts: run.script,
+        });
+        const domain = createDomain({
+          store,
+          provider,
+          conclusionPolicy: policy({ judgeTiming: 'count' }),
+          surfacingPolicy: surfacingPolicy(),
+          random: () => 0,
+        });
+
+        await answerDrops(domain);
+        const conclusions = await readConclusions(domain, 2);
+
+        const result = await domain.requestSurfacing();
+        assert.equal(result.kind, 'surfaced', `${run.name}: one line stood in its place`);
+        if (result.kind !== 'surfaced') return;
+        assert.equal(
+          result.text,
+          conclusions[0]?.text,
+          `${run.name}: and it is a sentence the portrait already holds`,
+        );
+        assert.ok(
+          !result.text.includes('宝贝'),
+          `${run.name}: nothing of the rejected attempt reached the user`,
+        );
+        // One retry, told what the first attempt broke — never a second reroll.
+        assert.equal(provider.answers.length, run.script.length, `${run.name}: asked the right number of times`);
+        if (run.script.length === 2) {
+          assert.ok(
+            (provider.answers[1]?.violations?.length ?? 0) > 0,
+            'and the retry was told which rules the first attempt broke',
+          );
+        }
+      } finally {
+        await store.close();
+      }
+    });
+  }
+});
+
+await check('asking and surfacing share one cooldown, and a turn produces one line', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = mattersOnly(ANSWER_READINGS, {
+        composeConclusionByAnchor: ANSWER_SENTENCES,
+        answerFallback: { kind: 'sentence', text: ANSWER_SENTENCE },
+      });
+      const domain = createDomain({
+        store,
+        provider,
+        conclusionPolicy: policy({ judgeTiming: 'count' }),
+        surfacingPolicy: surfacingPolicy(),
+        random: () => 0,
+      });
+
+      await answerDrops(domain);
+      await readConclusions(domain, 2);
+      const answer = answeredOf(await domain.requestSurfacing());
+
+      // One line, and the record says exactly what was heard: every conclusion
+      // the answer drew on, and no separate surfacing beside it. That is what
+      // "共用同一套冷却与条数上限" means once it is storage rather than prose.
+      const records = await store.listSurfacings();
+      assert.deepEqual(
+        records.map((record) => record.conclusionId).sort(),
+        answer.conclusions.map((conclusion) => conclusion.id).sort(),
+        'what was recorded is what the answer was made of',
+      );
+
+      // The same cooldown answers a drop: two channels that each produced a line
+      // here would be two things said in one turn.
+      assert.deepEqual(
+        await domain.requestSurfacing(),
+        { kind: 'none', reason: 'cooldown' },
+        'and asking again does not repeat it',
+      );
+
+      const again = await domain.drop(ANSWER_EXAM_2);
+      assert.deepEqual(
+        await domain.requestSurfacing({ dropId: again.id }),
+        { kind: 'none', reason: 'cooldown' },
+        'nor does a drop about one of the same matters',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a drop is never answered with an assembled one — it gets its own line', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = mattersOnly(ANSWER_READINGS, {
+        composeConclusionByAnchor: ANSWER_SENTENCES,
+        answerFallback: { kind: 'sentence', text: ANSWER_SENTENCE },
+      });
+      const domain = createDomain({
+        store,
+        provider,
+        conclusionPolicy: policy({ judgeTiming: 'count' }),
+        surfacingPolicy: surfacingPolicy(),
+        random: () => 0,
+      });
+
+      await answerDrops(domain);
+      const conclusions = await readConclusions(domain, 2);
+
+      // Everything an answer would need is there, and this is still a drop: what
+      // the user said gets the one line that belongs to the moment they made.
+      const dropped = await domain.drop(ANSWER_EXAM_2);
+      const result = await domain.requestSurfacing({ dropId: dropped.id });
+      assert.equal(result.kind, 'surfaced');
+      if (result.kind !== 'surfaced') return;
+      assert.equal(result.text, conclusions[0]?.text);
+      assert.deepEqual(provider.answers, [], 'and no assembly was asked for');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('what the user has already heard is not gathered into a new answer', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = mattersOnly(ANSWER_READINGS, {
+        composeConclusionByAnchor: ANSWER_SENTENCES,
+        answerFallback: { kind: 'sentence', text: ANSWER_SENTENCE },
+      });
+      const domain = createDomain({
+        store,
+        provider,
+        conclusionPolicy: policy({ judgeTiming: 'count' }),
+        surfacingPolicy: surfacingPolicy(),
+        random: () => 0,
+      });
+
+      await answerDrops(domain);
+      await readConclusions(domain, 2);
+
+      // One of the two is shown on its own first — a drop, so the one line. The
+      // other is still eligible, and one eligible conclusion is not an answer:
+      // the floor counts what may be said now, not what the portrait holds.
+      const dropped = await domain.drop(ANSWER_EXAM_2);
+      assert.equal((await domain.requestSurfacing({ dropId: dropped.id })).kind, 'surfaced');
+
+      const result = await domain.requestSurfacing();
+      assert.equal(result.kind, 'surfaced', 'the one thing left is shown as itself');
+      if (result.kind !== 'surfaced') return;
+      assert.equal(result.conclusion.text, '我不太确定：你好像真的很想学吉他。');
+      assert.deepEqual(provider.answers, [], 'and nothing was assembled out of it');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a matter the user has marked wrong is not gathered into an answer', async () => {
+  // Ticket 10 left the chain holding three kinds of record — a claim, a catch and
+  // a correction — and "the newest thing per matter" is not always a judgement.
+  // Gathering without looking at the kind would hand the provider the sentence the
+  // user has just rejected, which is the product routing around their own
+  // correction: the one answer it must not give.
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = mattersOnly(ANSWER_READINGS, {
+        composeConclusionByAnchor: ANSWER_SENTENCES,
+        answerFallback: { kind: 'sentence', text: ANSWER_SENTENCE },
+      });
+      const domain = createDomain({
+        store,
+        provider,
+        conclusionPolicy: policy({ judgeTiming: 'count' }),
+        surfacingPolicy: surfacingPolicy(),
+        random: () => 0,
+      });
+
+      await answerDrops(domain);
+      const conclusions = await readConclusions(domain, 2);
+      const exam = conclusions.find((conclusion) =>
+        conclusion.support.some((term) => term.text === '期末怎么算分'),
+      );
+      assert.ok(exam !== undefined, 'the exam matter has something to reject');
+      if (exam === undefined) return;
+      await domain.markConclusionWrong(exam.id);
+
+      const result = await domain.requestSurfacing();
+      assert.equal(result.kind, 'surfaced', 'one matter is left, and one is not an answer');
+      if (result.kind !== 'surfaced') return;
+      assert.equal(result.text, '我不太确定：你好像真的很想学吉他。');
+      assert.deepEqual(provider.answers, [], 'and the rejected sentence was never handed over');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('an answer resting on a matter the user rejected speaks one band softer', async () => {
+  // Ticket 10's decision reached the chain: a matter the user marked wrong speaks
+  // one band down, and the step is written on the conclusion so the page can say
+  // why. An answer is a judgement assembled from those conclusions, so it may not
+  // speak more firmly than the thing it rests on — the same step, reported the
+  // same way. Both runs raise exactly the same material; only the rejection
+  // differs, so what the band does cannot be read off the material.
+  for (const rejected of [true, false]) {
+    await withDatabase(async (file) => {
+      const store = openSqliteStore(file);
+      const clock = simulatedClock('2026-09-01T09:00:00.000Z');
+      try {
+        const provider = mattersOnly([...ANSWER_READINGS, ANSWER_EXAM_3_READING], {
+          composeConclusionByAnchor: ANSWER_SENTENCES,
+          answerFallback: { kind: 'sentence', text: ANSWER_SENTENCE },
+        });
+        const domain = createDomain({
+          store,
+          provider,
+          conclusionPolicy: policy({ judgeTiming: 'count' }),
+          surfacingPolicy: surfacingPolicy(),
+          now: clock.now,
+          random: () => 0,
+        });
+
+        // The exam matter over four days, so its numbers earn the medium band,
+        // and the guitar one in a sitting beside it.
+        await domain.drop(ANSWER_EXAM_1);
+        clock.advanceDays(4);
+        await domain.drop(ANSWER_EXAM_2);
+        await domain.drop(ANSWER_EXAM_2);
+        const [exam] = await readConclusions(domain, 1);
+        assert.ok(exam !== undefined);
+        if (exam === undefined) return;
+        await raiseThreeTimes(domain, ANSWER_GUITAR_READINGS);
+
+        // The same fragment joins the exam matter either way. Rejected, it has to
+        // be **pinned** there — a matter the user called wrong no longer attracts
+        // look-alikes by overlap (ticket 10) — and written beside the conclusion
+        // is exactly how a person says "this is about that".
+        if (rejected) {
+          await domain.markConclusionWrong(exam.id);
+          await domain.appendToConclusion(exam.id, ANSWER_EXAM_3);
+        } else {
+          await domain.drop(ANSWER_EXAM_3);
+        }
+        await readConclusions(domain, rejected ? 4 : 3);
+
+        const answer = answeredOf(await domain.requestSurfacing());
+        // Seven words over four days is the medium band's reading of the numbers.
+        assert.equal(answer.tier, rejected ? 'weak' : 'medium', 'the band the numbers earn, stepped or not');
+        assert.equal(answer.softened, rejected, 'and the step is said out loud rather than left to be inferred');
+        assert.equal(
+          answer.text,
+          `${rejected ? '我不太确定：' : '听起来，'}${ANSWER_SENTENCE}。`,
+          'so the wording follows the band that was actually written',
+        );
+      } finally {
+        await store.close();
+      }
+    });
+  }
+});
+
+await check('how many conclusions an answer gathers is a dial, and two is a floor', async () => {
+  // Three runs of one rule, each turning one dial: the limit takes the newest
+  // few, the floor can be raised, and it can never be lowered below two — one
+  // conclusion is not a smaller answer, it is the restatement the ticket rules
+  // out, so a policy asking for one is read as two.
+  const runs = [
+    {
+      name: 'the limit keeps the newest few',
+      readings: [...ANSWER_READINGS, ...ANSWER_SLEEP_READINGS],
+      settled: 3,
+      policy: { answerLimit: 2 },
+      expected: 'answered',
+      gathered: ['你好像真的很想学吉他', ANSWER_SLEEP_SENTENCE],
+    },
+    {
+      name: 'the floor can be raised above what is there',
+      readings: ANSWER_READINGS,
+      settled: 2,
+      policy: { answerFloor: 3 },
+      expected: 'surfaced',
+      gathered: [],
+    },
+    {
+      name: 'and it can never be lowered below two',
+      readings: ANSWER_EXAM_READINGS,
+      settled: 1,
+      policy: { answerFloor: 1 },
+      expected: 'surfaced',
+      gathered: [],
+    },
+  ] as const;
+
+  for (const run of runs) {
+    await withDatabase(async (file) => {
+      const store = openSqliteStore(file);
+      try {
+        const provider = mattersOnly(run.readings, {
+          composeConclusionByAnchor: ANSWER_SENTENCES,
+          answerFallback: { kind: 'sentence', text: ANSWER_SENTENCE },
+        });
+        const domain = createDomain({
+          store,
+          provider,
+          conclusionPolicy: policy({ judgeTiming: 'count' }),
+          surfacingPolicy: surfacingPolicy(run.policy),
+          random: () => 0,
+        });
+
+        await raiseThreeTimes(domain, run.readings);
+        await readConclusions(domain, run.settled);
+
+        const result = await domain.requestSurfacing();
+        assert.equal(result.kind, run.expected, run.name);
+        assert.deepEqual(
+          provider.answers.map((asked) => [...asked.conclusions]),
+          run.gathered.length === 0 ? [] : [run.gathered],
+          `${run.name}: and what it gathered is what it was told to`,
+        );
+      } finally {
+        await store.close();
+      }
+    });
+  }
 });
 
 console.log('\ndomain core — recall');
