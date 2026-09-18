@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Domain-core tests — a directly executable, single-file entry.
  *
  *   node src/domain/domain.test.ts
@@ -36,6 +36,7 @@ import {
   type FakeProviderScript,
 } from './fake-provider.ts';
 import type { Conclusion, Domain, InputType, SurfacingResult, Term, TermLink } from './interface.ts';
+import { DEFAULT_LINK_POLICY, decideLink, type LinkDecision } from './linking.ts';
 import {
   PRESET_ACTS,
   PRESET_DROP_TERMS,
@@ -886,6 +887,30 @@ const HILL_DROP = '又想起学琴这事了，周末想去爬山';
 const THIRD_DROP = '周末想去爬山，顺便看看装备';
 const SWAP_DROP = '想学门乐器，先看看钢琴';
 
+/**
+ * A unit vector whose cosine against `[1, 0]` is `score`.
+ *
+ * The linking checks need a pair at a chosen cosine, and writing
+ * `[x, Math.sqrt(1 - x ** 2)]` out at every fixture is both noisy and easy to
+ * get wrong. `[1, 0]` against this vector is `score`, by construction.
+ *
+ * @param score - the cosine the pair should have.
+ * @returns the vector to pair with `[1, 0]`.
+ */
+function atCosine(score: number): readonly number[] {
+  return [score, Math.sqrt(1 - score ** 2)];
+}
+
+/**
+ * Two vectors 0.855 apart — a pair inside the **calibrated** grey zone.
+ *
+ * Ticket 14 measured the real embedding and put the bands at 0.85/0.87, so the
+ * 0.8 pair these checks used to use is now below the unrelated gate: the grey zone
+ * moved, and the fixture that says "a pair in the middle of it" moved with it.
+ * The checks that pin an explicit policy still spell their own pair out.
+ */
+const GREY_PAIR_VECTORS = { 想学吉他: [1, 0], 想学门乐器: atCosine(0.855) };
+
 await check("a drop's terms keep the user's own words, not a tidied-up concept", async () => {
   await withDatabase(async (file) => {
     const store = openSqliteStore(file);
@@ -1115,7 +1140,7 @@ await check('a pair in the grey zone is judged, and connects when the judge says
           [HILL_DROP, ['想学门乐器']],
         ],
         {
-          embedByText: vectors({ 想学吉他: [1, 0], 想学门乐器: [0.8, 0.6] }),
+          embedByText: vectors(GREY_PAIR_VECTORS),
           judgeLinkByPair: {
             '想学吉他\u0000想学门乐器': { kind: 'verdict', related: true },
           },
@@ -1131,8 +1156,8 @@ await check('a pair in the grey zone is judged, and connects when the judge says
       assert.ok(link !== undefined, 'the judged pair is linked');
       assert.match(link.reason, /灰区/, 'and the reason says it was judged, not merely scored');
       assert.ok(
-        link.strength !== undefined && link.strength > 0.7 && link.strength < 0.85,
-        'its strength is the score it actually got',
+        link.strength !== undefined && link.strength > 0.85 && link.strength < 0.87,
+        'its strength is the score it actually got — inside the calibrated grey zone',
       );
 
       const [pair] = provider.judged;
@@ -1158,7 +1183,7 @@ await check('a grey pair the judge turns down is not linked', async () => {
           [HILL_DROP, ['想学门乐器']],
         ],
         {
-          embedByText: vectors({ 想学吉他: [1, 0], 想学门乐器: [0.8, 0.6] }),
+          embedByText: vectors(GREY_PAIR_VECTORS),
           judgeLinkFallback: { kind: 'verdict', related: false },
         },
       );
@@ -1169,6 +1194,110 @@ await check('a grey pair the judge turns down is not linked', async () => {
       await settledUntil(async () => provider.judged.length > 0);
 
       assert.deepEqual(await domain.listLinks(), [], 'the judge was asked and said no');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('the calibrated bands: 0.87 links, 0.85 skips, and the grey zone between them is the only thing asked about', async () => {
+  // Ticket 14 measured the real embedding over 42 labelled pairs of this
+  // product's own wordings: related pairs 0.861–0.977, unrelated ones
+  // 0.810–0.856, and the known false link at 0.851. It also measured that the
+  // same pair moves by up to 0.0125 with the size of the batch it was encoded
+  // in, so the gates are pinned at the extremes rather than in the middle.
+  // `decideLink` is imported here for the same reason `checkConclusion` is:
+  // the bands *are* the rule, and a check that had to reach them through a
+  // whole drop could only pin them by accident.
+  const bands: readonly (readonly [number, LinkDecision])[] = [
+    [0.87, 'link'],
+    [0.875, 'link'],
+    [0.8633, 'ask'],
+    [0.861, 'ask'],
+    [0.856, 'ask'],
+    [0.851, 'ask'],
+    [0.85, 'skip'],
+    [0.848, 'skip'],
+  ];
+
+  for (const [score, expected] of bands) {
+    assert.equal(decideLink(score, DEFAULT_LINK_POLICY), expected, `cosine ${score} should be ${expected}`);
+  }
+});
+
+await check('the measured false link is put to the judge, and turned down it is not an edge', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      // 琴行的帖子 × 下周三交提纲 measured 0.851 — above the old 0.85 gate,
+      // which is how it became a direct edge. It now sits in the grey zone, so
+      // whether it is a link is the judge's answer rather than the score's.
+      const provider = termsOnly(
+        [
+          [GUITAR_DROP, ['琴行的帖子']],
+          [HILL_DROP, ['下周三交提纲']],
+        ],
+        {
+          embedByText: vectors({
+            琴行的帖子: [1, 0],
+            下周三交提纲: atCosine(0.851),
+          }),
+          judgeLinkFallback: { kind: 'verdict', related: false },
+        },
+      );
+      const domain = createDomain({ store, provider });
+
+      await readTerms(domain, (await domain.drop(GUITAR_DROP)).id);
+      await readTerms(domain, (await domain.drop(HILL_DROP)).id);
+      await settledUntil(async () => provider.judged.length > 0);
+
+      const [asked] = provider.judged;
+      assert.equal(provider.judged.length, 1, 'this pair is the one that gets asked about');
+      assert.deepEqual(
+        [asked?.from, asked?.to].sort(),
+        ['下周三交提纲', '琴行的帖子'].sort(),
+        'and it is that pair, by both names',
+      );
+      assert.deepEqual(await domain.listLinks(), [], 'the judge said no, so there is no edge');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a related pair measured on the direct side links on its score alone, with nobody asked', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      // 想学吉他 × 琴行的帖子 measured 0.875: above the direct gate, so the
+      // judge is not part of this edge at all.
+      const provider = termsOnly(
+        [
+          [GUITAR_DROP, ['想学吉他']],
+          [HILL_DROP, ['琴行的帖子']],
+        ],
+        {
+          embedByText: vectors({
+            想学吉他: [1, 0],
+            琴行的帖子: atCosine(0.875),
+          }),
+        },
+      );
+      const domain = createDomain({ store, provider });
+
+      await readTerms(domain, (await domain.drop(GUITAR_DROP)).id);
+      await readTerms(domain, (await domain.drop(HILL_DROP)).id);
+      const links = await readLinks(domain, 1);
+
+      const link = linkBetween(links, '想学吉他', '琴行的帖子');
+      assert.ok(link !== undefined, 'the pair is an edge');
+      assert.equal(link.kind, 'similar', 'the semantic kind');
+      assert.ok(
+        link.strength !== undefined && Math.abs(link.strength - 0.875) < 1e-9,
+        'its strength is the score it got',
+      );
+      assert.doesNotMatch(link.reason, /灰区/, 'and the reason does not claim a judge decided it');
+      assert.deepEqual(provider.judged, [], 'because nobody was asked');
     } finally {
       await store.close();
     }
@@ -1320,7 +1449,7 @@ await check('a provider that blows up in the grey zone does not turn the pair in
           [HILL_DROP, ['想学门乐器']],
         ],
         {
-          embedByText: vectors({ 想学吉他: [1, 0], 想学门乐器: [0.8, 0.6] }),
+          embedByText: vectors(GREY_PAIR_VECTORS),
           judgeLinkFallback: { kind: 'throw', reason: 'judge blew up' },
         },
       );
@@ -1328,8 +1457,12 @@ await check('a provider that blows up in the grey zone does not turn the pair in
 
       await readTerms(domain, (await domain.drop(GUITAR_DROP)).id);
       await readTerms(domain, (await domain.drop(HILL_DROP)).id);
-      await settledUntil(async () => false);
+      await settledUntil(async () => provider.judged.length > 0);
 
+      // Asked at all is half the claim: if the bands ever move again and this
+      // pair stops landing in the grey zone, the check would otherwise pass
+      // without ever reaching the failure it exists for.
+      assert.equal(provider.judged.length, 1, 'the pair is in the grey zone, so it is asked about');
       assert.deepEqual(
         await domain.listLinks(),
         [],
@@ -5715,6 +5848,37 @@ await check('the three acts run twice over the same library and come back the sa
         second,
         first,
         'same material, same chain, same lines — nothing left to luck',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('every link a demo makes is a hard edge: its provider scripts no vectors to compare', async () => {
+  await withDatabase(async (file) => {
+    const { store, domain } = await presetRun(file);
+    try {
+      await runThreeActs(domain);
+      // Wait for the background halves — the acts' own awaits return before the
+      // accumulation queue has drained — so "no semantic edge" is a fact about
+      // the finished run rather than about timing.
+      await settledUntil(async () => false);
+
+      const links = await domain.listLinks();
+      assert.ok(links.length > 0, 'the acts do connect terms');
+      assert.deepEqual(
+        [...new Set(links.map((link) => link.kind))],
+        ['same-drop'],
+        'and the only kind is the zero-model one',
+      );
+      // The reason this is a property of the demo rather than of the thresholds:
+      // the preset provider has no vectors to hand back, so the semantic half
+      // cannot produce a score to compare — which is what makes ticket 14's
+      // recalibration invisible here.
+      assert.ok(
+        links.every((link) => link.strength === 1),
+        'each one as strong as saying two things in one breath',
       );
     } finally {
       await store.close();

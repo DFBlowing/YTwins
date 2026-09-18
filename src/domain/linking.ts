@@ -1,4 +1,4 @@
-/**
+﻿/**
  * The rules that turn two terms into a **link**.
  *
  * Three decisions live here, and nowhere else, because they are the ones that
@@ -23,10 +23,11 @@
  * without reaching into the implementation, which is what makes "the rule can
  * be changed later" true rather than aspirational.
  *
- * The initial numbers are a starting point, not a finding. The research notes
- * that a plain threshold produces wrong edges in a wide middle band and gives
- * 0.7–0.85 as the shape of that band, not as a measured value for this product
- * — ticket 05's prototype is where they get calibrated against real terms.
+ * The numbers were a starting point until real material existed. The research
+ * notes that a plain threshold produces wrong edges in a wide middle band and
+ * gives 0.7–0.85 as the shape of that band, not as a measured value for this
+ * product; ticket 14 measured the real embedding and the note on
+ * `DEFAULT_LINK_POLICY` is what came back.
  */
 export interface LinkPolicy {
   /**
@@ -41,7 +42,9 @@ export interface LinkPolicy {
    *
    * The cheaper half of the three-band design: most pairs of terms in a year of
    * drops are unrelated, and a price paid per unrelated pair is the one that
-   * would make linking cost more than it is worth.
+   * would make linking cost more than it is worth. Measured, that argument is
+   * sharper than the research expected — see `DEFAULT_LINK_POLICY` — because the
+   * unrelated pairs are not spread out but crowded into one narrow band.
    */
   readonly skipBelow: number;
   /**
@@ -58,13 +61,55 @@ export interface LinkPolicy {
 /**
  * The policy in force until something says otherwise.
  *
- * Wide grey zone on purpose: at this stage the cost of asking is a fraction of
- * a cent per drop, and a wrong link is visible to the user while a missing one
- * is not.
+ * **These are measured numbers, not reasoned ones** (ticket 14, 2026-09-18). The
+ * sample was 42 labelled pairs of this product's own wordings, encoded through
+ * the real local embedding (`Xenova/multilingual-e5-small`, `query: ` prefix and
+ * all — the same `createLocalEmbedding` path the server runs):
+ *
+ * ```text
+ * related pairs    [0.861, 0.977]   mean 0.900
+ * unrelated pairs  [0.810, 0.856]   mean 0.839
+ * ```
+ *
+ * The two distributions separate, but by 0.005 — this model puts almost
+ * everything it reads into a narrow band near 0.85, so "high" and "low" are not
+ * far apart and a threshold picked by intuition lands between them anyway. The
+ * measured false link (`琴行的帖子 × 下周三交提纲`, 0.851) sat 0.001 above the old
+ * 0.85 gate, which is exactly the kind of margin this embedding produces.
+ *
+ * **A pair's score is not even that reproducible.** The same two texts score
+ * differently depending on how many texts were encoded in the same call: over
+ * the same 42 pairs the spread across batch sizes had a median of 0.006 and a
+ * maximum of 0.0125, which is wider than the 0.005 between the two
+ * distributions. So the direct gate cannot be trusted to sit *inside* that gap:
+ * measured at its worst batch size, the highest unrelated pair reaches 0.8633,
+ * and at 0.86 it was a direct edge — a false one. At 0.87 the worst case of
+ * every measured unrelated pair is still below the gate, and the lowest related
+ * pair (0.8647 at its own worst) is still above the skip gate.
+ *
+ * Hence both bounds sit at the edge of the crowded region rather than in the
+ * middle of it: the direct gate above every unrelated score this model produces
+ * at any batch size, the unrelated gate just below the unrelated ceiling, and
+ * the grey zone between them — the only scores a judge is asked about — is where the
+ * two distributions overlap. The crowded band underneath (0.81–0.85, eleven of
+ * the sixteen negatives) is skipped without a call, because everything measured
+ * there was unrelated.
+ *
+ * What this buys is the thing the old policy could not do: no measured unrelated
+ * pair is an edge on the score alone, at any batch size. What it costs is that
+ * the weakest genuinely related pairs — the ones scoring just over 0.86 — are
+ * put to a judge instead of connecting themselves, which is the trade the
+ * research asks for: a missed link is the cheaper mistake, and a false one is
+ * visible.
+ *
+ * These numbers belong to this embedding. A different model, a different
+ * quantisation, or an encoding path that batches differently re-opens the
+ * calibration — which is why they live in a value handed to `createDomain`
+ * rather than inside the linking path.
  */
 export const DEFAULT_LINK_POLICY: LinkPolicy = {
-  connectAbove: 0.85,
-  skipBelow: 0.7,
+  connectAbove: 0.87,
+  skipBelow: 0.85,
   greyZone: 'judge',
 };
 
