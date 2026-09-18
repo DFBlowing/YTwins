@@ -355,8 +355,13 @@ try {
     assert.notEqual(bulk.status, 200, 'a list of conclusions is not something to act on');
 
     // And the page the user reads never offers one. What such an entry point
-    // would be labelled with, checked against everything the page is built from.
-    const page = ['index.html', 'main.ts', 'style.css']
+    // would be labelled with, checked against everything either page is built
+    // from — **both** pages, since ticket 15 split them: the product's one box
+    // (`index.html` + `one-box.ts`) and the three-act page (`demo.html` +
+    // `main.ts`). Listing only the first of each would leave the other page's
+    // markup unchecked, and this is a claim about the product rather than about
+    // one of its two faces.
+    const page = ['index.html', 'one-box.ts', 'demo.html', 'main.ts', 'style.css']
       .map((name) =>
         readFileSync(fileURLToPath(new URL(`../src/web/${name}`, import.meta.url)), 'utf8'),
       )

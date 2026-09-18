@@ -5886,6 +5886,264 @@ await check('every link a demo makes is a hard edge: its provider scripts no vec
   });
 });
 
+console.log('\ndomain core — one box, three doings');
+
+/**
+ * The four kinds of thing a user can put into the one box (ticket 15), in the
+ * words each check drops.
+ *
+ * The fragment and the unsure fragment carry no question mark and no asking
+ * phrase beyond a trailing 「吗」; the record question and the self question are
+ * the two arms the port's judgement has to tell apart. `BOX_UNCOVERED_QUESTION`
+ * carries 「哪」 rather than the whole word 「哪里」, which is the shape ordinary
+ * code has to catch without a model.
+ */
+const BOX_FRAGMENT = '楼下咖啡店换了个新豆子，闻着不错';
+const BOX_UNSURE = '下周三交提纲吗';
+const BOX_RECORD_QUESTION = '期末怎么算分';
+const BOX_UNCOVERED_QUESTION = '上周的会议纪要放哪了';
+const BOX_SELF_QUESTION = '你觉得我最近怎么样';
+const BOX_EMOTIONAL_QUESTION = '期末考 60% 到底考什么啊？';
+
+/** What the fake reads the box's fragments as. */
+const BOX_READINGS: readonly AnchoredReading[] = [
+  [BOX_FRAGMENT, ['新豆子'], null, 'idea'],
+  // A feeling, worded with a particle that ends a question and also ends a
+  // thought spoken aloud. No anchor, so it opens no matter: what this check is
+  // about is that neither the model nor the moment is asked anything.
+  [BOX_UNSURE, ['下周三交提纲'], null, 'emotion'],
+  // A feeling **marked** as a question. The input type does not get to swallow
+  // this one: an explicit question goes to the model whatever the reader called
+  // the drop, and the check below is what makes that split load-bearing rather
+  // than incidental.
+  [BOX_EMOTIONAL_QUESTION, ['期末考 60%'], null, 'emotion'],
+];
+
+await check('a fragment is only a drop: nobody is asked, and nothing is said after it', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = mattersOnly(BOX_READINGS, {
+        // The one question scripted here, so the check can tell "the model was
+        // asked and said this" from "nobody was asked" — the same split the
+        // whole routing turns on.
+        judgeQuestionByBody: {
+          [BOX_EMOTIONAL_QUESTION]: { kind: 'asking', about: 'records' },
+        },
+        parseQuestionByQuestion: {
+          [BOX_EMOTIONAL_QUESTION]: { kind: 'match', matchText: ['期末考 60%'] },
+        },
+        composeFallback: { kind: 'answer', answer: ANSWER },
+      });
+      const domain = createDomain({ store, provider });
+
+      const delivery = await domain.deliver(BOX_FRAGMENT);
+
+      assert.equal(delivery.speech.kind, 'none', 'a fragment gets nothing but its own reply');
+      assert.equal(delivery.drop.body, BOX_FRAGMENT, 'and the original is kept word for word');
+      assert.ok(delivery.drop.reply.trim().length > 0, 'a drop is never silent');
+      assert.deepEqual(
+        delivery.drop.terms.map((term) => term.text),
+        ['新豆子'],
+        'what the reading produced travels with the delivery',
+      );
+      assert.equal(delivery.drop.extracted, true, 'the delivery waits for the reading rather than guessing');
+      assert.equal(provider.classified.length, 0, 'a statement is settled by ordinary code: nobody was asked');
+
+      // The other half of the cheap path, and the one the input type is read
+      // for: 「…吗」 is where a question and a thought spoken aloud look alike, so
+      // it is the arm that decides by the drop's own 输入类型 instead of by a
+      // model call.
+      const unsure = await domain.deliver(BOX_UNSURE);
+      assert.equal(unsure.speech.kind, 'none', 'a feeling worded with 吗 is still a feeling');
+      assert.equal(provider.classified.length, 0, 'and the model was not asked about it either');
+
+      // …and the arm that must **not** be swallowed by the same rule. A question
+      // the user marked as one goes to the model even though this drop was read
+      // as a feeling, because the input type is a gate in front of the model and
+      // never a substitute for it.
+      const asked = await domain.deliver(BOX_EMOTIONAL_QUESTION);
+      assert.deepEqual(
+        provider.classified.map((request) => request.body),
+        [BOX_EMOTIONAL_QUESTION],
+        'an explicit question is judged whatever the drop was read as',
+      );
+      assert.equal(provider.classified[0]?.shape, 'question', 'and it arrives with the shape code read');
+      assert.equal(asked.speech.kind, 'recall', 'so a feeling worded as a question about the records is one');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a question about the records is answered with its source, and no judgement is pushed at it', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      // Material that **could** have spoken: one matter raised three times, with
+      // a sentence scripted for it. Without that, "the moment was not consulted"
+      // would be true of an empty library rather than of this rule.
+      const provider = mattersOnly(EXAM_READINGS, {
+        composeConclusionByAnchor: { 好烦: { kind: 'sentence', text: EXAM_SENTENCE } },
+        judgeQuestionByBody: { [BOX_RECORD_QUESTION]: { kind: 'asking', about: 'records' } },
+        parseQuestionByQuestion: {
+          [BOX_RECORD_QUESTION]: { kind: 'match', matchText: ['期末', '算分'] },
+        },
+        composeFallback: { kind: 'answer', answer: ANSWER },
+      });
+      const domain = createDomain({
+        store,
+        provider,
+        conclusionPolicy: policy({ judgeTiming: 'count' }),
+        surfacingPolicy: surfacingPolicy(),
+        random: () => 0,
+      });
+
+      const grading = await domain.drop(GRADING_DROP);
+      for (const body of [EXAM_FIRST, EXAM_SECOND, EXAM_THIRD]) await domain.drop(body);
+      await readConclusions(domain, 1);
+
+      const delivery = await domain.deliver(BOX_RECORD_QUESTION);
+
+      assert.equal(delivery.speech.kind, 'recall', 'a question about the records is put to them');
+      if (delivery.speech.kind !== 'recall') return;
+      assert.equal(delivery.speech.result.kind, 'answered');
+      if (delivery.speech.result.kind !== 'answered') return;
+
+      assert.equal(delivery.speech.result.answer, ANSWER);
+      const sources = delivery.speech.result.sources;
+      assert.ok(
+        sources.some((source) => source.dropId === grading.id),
+        'the fragment that really said it is cited',
+      );
+      // The words the user just typed are the most literal match their own
+      // question will ever have, and citing them back would be the product
+      // answering a question with the question.
+      assert.ok(
+        !sources.some((source) => source.dropId === delivery.drop.id),
+        'and the question is never one of its own sources',
+      );
+      assert.deepEqual(provider.askedQuestions, [BOX_RECORD_QUESTION], 'the machinery used was recall');
+      assert.deepEqual(provider.answers, [], 'the moment was never consulted: no judgement was pushed');
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a question the records do not cover says so, and is still not answered with a judgement', async () => {
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = mattersOnly(EXAM_READINGS, {
+        composeConclusionByAnchor: { 好烦: { kind: 'sentence', text: EXAM_SENTENCE } },
+        judgeQuestionByBody: { [BOX_UNCOVERED_QUESTION]: { kind: 'asking', about: 'records' } },
+      });
+      const domain = createDomain({
+        store,
+        provider,
+        conclusionPolicy: policy({ judgeTiming: 'count' }),
+        surfacingPolicy: surfacingPolicy(),
+        random: () => 0,
+      });
+
+      for (const body of [EXAM_FIRST, EXAM_SECOND, EXAM_THIRD]) await domain.drop(body);
+      await readConclusions(domain, 1);
+
+      const delivery = await domain.deliver(BOX_UNCOVERED_QUESTION);
+
+      assert.equal(delivery.speech.kind, 'recall');
+      if (delivery.speech.kind !== 'recall') return;
+      assert.equal(
+        delivery.speech.result.kind,
+        'not-found',
+        'the records were searched, and saying so plainly is the answer',
+      );
+      assert.deepEqual(
+        provider.answers,
+        [],
+        'what the product does have is not dressed up as a judgement about them',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+await check('a question about the user is answered from several conclusions, and falls back to one line', async () => {
+  // Two matters have crossed the threshold: there is an answer to assemble.
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = mattersOnly(ANSWER_READINGS, {
+        composeConclusionByAnchor: ANSWER_SENTENCES,
+        answerFallback: { kind: 'sentence', text: ANSWER_SENTENCE },
+        judgeQuestionByBody: { [BOX_SELF_QUESTION]: { kind: 'asking', about: 'self' } },
+      });
+      const domain = createDomain({
+        store,
+        provider,
+        conclusionPolicy: policy({ judgeTiming: 'count' }),
+        surfacingPolicy: surfacingPolicy(),
+        random: () => 0,
+      });
+
+      await answerDrops(domain);
+      await readConclusions(domain, 2);
+
+      const delivery = await domain.deliver(BOX_SELF_QUESTION);
+
+      assert.equal(delivery.speech.kind, 'surface', 'the records do not answer this: the moment does');
+      if (delivery.speech.kind !== 'surface') return;
+      const answer = answeredOf(delivery.speech.result);
+      assert.equal(answer.text, `我不太确定：${ANSWER_SENTENCE}。`);
+      assert.equal(answer.conclusions.length, 2, 'several brought together, not one restated');
+      // The records are deliberately not consulted first: a question about what
+      // the product makes of someone is not a question about what they wrote
+      // down, and on the real chain putting it to them first handed the user
+      // their own newest fragment back (ticket 15's Comments).
+      assert.deepEqual(provider.askedQuestions, [], 'the records were never put to it');
+      assert.ok(provider.answers.length > 0, 'the moment was, and it assembled the answer');
+    } finally {
+      await store.close();
+    }
+  });
+
+  // One matter only: ticket 11's fallback, reached through the one box.
+  await withDatabase(async (file) => {
+    const store = openSqliteStore(file);
+    try {
+      const provider = mattersOnly(EXAM_READINGS, {
+        composeConclusionByAnchor: { 好烦: { kind: 'sentence', text: EXAM_SENTENCE } },
+        judgeQuestionByBody: { [BOX_SELF_QUESTION]: { kind: 'asking', about: 'self' } },
+      });
+      const domain = createDomain({
+        store,
+        provider,
+        conclusionPolicy: policy({ judgeTiming: 'count' }),
+        surfacingPolicy: surfacingPolicy(),
+        random: () => 0,
+      });
+
+      for (const body of [EXAM_FIRST, EXAM_SECOND, EXAM_THIRD]) await domain.drop(body);
+      await readConclusions(domain, 1);
+
+      const delivery = await domain.deliver(BOX_SELF_QUESTION);
+
+      assert.equal(delivery.speech.kind, 'surface');
+      if (delivery.speech.kind !== 'surface') return;
+      const line = surfacedOf(delivery.speech.result);
+      assert.equal(
+        line.text,
+        `我不太确定：${EXAM_SENTENCE}。`,
+        'one conclusion is shown as itself rather than dressed up as an answer',
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
 console.log(`\n${checks - failures}/${checks} checks passed`);
 if (failures > 0) {
   console.error(`${failures} check(s) failed`);

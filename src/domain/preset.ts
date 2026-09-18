@@ -391,6 +391,16 @@ export function createPresetProvider(options: { readonly now?: () => string } = 
     parseQuestionByQuestion: {
       [PRESET_ACTS.question]: { kind: 'match', matchText: PRESET_MATCH_TEXT },
     },
+    // The one routing the stand-in has to be able to answer, now that the acts
+    // can be run through the **fused page** (ticket 15) as well: 「期末怎么算分」
+    // is a question about the user's own records, so the box answers it out of
+    // them. Every other line — the acts' fragments, and anything typed off
+    // script — is left unscripted, which the domain reads as "not a question"
+    // and treats as a fragment. That is the right reading for a demo whose
+    // fragments are exactly that.
+    judgeQuestionByBody: {
+      [PRESET_ACTS.question]: { kind: 'asking', about: 'records' },
+    },
     // Present so the fake never reaches its "no compose script" failure, and so
     // what this module replaces is legible: the real composition follows.
     composeFallback: { kind: 'answer', answer: PRESET_GRADING },

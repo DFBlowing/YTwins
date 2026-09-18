@@ -16,6 +16,11 @@
  * Ticket 11 adds the other end of the visible moment: bringing several
  * conclusions together into the one **answer** the user asked for, which is the
  * only call here that is handed more than one thing the product worked out.
+ * Ticket 15 adds the one judgement the fused page cannot make for itself: what
+ * the user's words were **addressed to** — a fragment, a question about their
+ * records, or a question about themselves. Ordinary code reads the shape of a
+ * question and settles the obvious cases without asking anyone (`routing.ts`);
+ * what crosses this seam is the part only meaning can settle.
  *
  * Note what settling does *not* put here: whether a matter may speak, when the
  * invisible look happens, and how firmly the sentence is allowed to speak. Those
@@ -40,6 +45,7 @@
  */
 
 import type { ConclusionTier, InputType, RecallSource } from './interface.ts';
+import type { QuestionShape, QuestionTarget } from './routing.ts';
 
 /** What the provider is asked to say something about. */
 export interface RespondRequest {
@@ -205,6 +211,52 @@ export interface JudgeLinkResult {
    */
   readonly related: boolean;
 }
+
+/**
+ * Words the provider is asked to judge as a question, or as something else.
+ *
+ * Asked only for text that **could** be a question: ordinary code has already
+ * read the shape (`routing.ts`), and a fragment with no question mark and no
+ * asking phrase in it never reaches here at all. What this call settles is the
+ * part a string cannot: whether these words are actually being put to the
+ * product, and whether they are about the user's records or about the user.
+ */
+export interface JudgeQuestionRequest {
+  /** The text as typed, verbatim. */
+  readonly body: string;
+  /**
+   * What ordinary code read off it: `question` or `unclear`.
+   *
+   * Sent rather than left out because it is the reason this call is happening —
+   * the same reading `JudgeLinkRequest.similarity` gets — and because the two
+   * shapes ask for different care: an explicit question must not be swallowed,
+   * while a trailing 「吗」 may only be someone thinking out loud.
+   */
+  readonly shape: QuestionShape;
+}
+
+/**
+ * What the provider made of the words: a question, and of what kind, or not one
+ * at all.
+ *
+ * A discriminated union rather than an optional target, for the reason every
+ * other answer on this port is one: "not a question" and "a question about
+ * themselves" are different outcomes, and a caller should have to have decided
+ * which it got. `asks: false` is a real answer here rather than a failure —
+ * 「下周三交提纲吗」 said to oneself is the case this arm exists for — and it is
+ * also what a caller that could not tell must read as (`routing.ts`).
+ */
+export type JudgeQuestionResult =
+  | {
+      /** The words are not a question put to the product. They stay a fragment. */
+      readonly asks: false;
+    }
+  | {
+      /** The user is asking something, and this is what it is about. */
+      readonly asks: true;
+      /** Which of the two the question stands on. */
+      readonly about: QuestionTarget;
+    };
 
 /** A question the user asked of their records. */
 export interface ParseQuestionRequest {
@@ -478,6 +530,21 @@ export interface AiProvider {
    * @returns the sentence, before the band's opening is applied.
    */
   composeAnswer(request: ComposeAnswerRequest): Promise<ComposeAnswerResult>;
+
+  /**
+   * Judge what the user's words were addressed to.
+   *
+   * Called only for text that could be a question — see `JudgeQuestionRequest` —
+   * and only where the drop's own reading does not already settle it. The
+   * tolerance is the same as everywhere else on this port: throwing, hanging or
+   * returning nonsense leaves the words a **fragment**, which is the arm that
+   * says one line less rather than answering a thought spoken aloud as though it
+   * were a question.
+   *
+   * @param request - the words, and the shape ordinary code read off them.
+   * @returns whether they are a question, and what they are about.
+   */
+  judgeQuestion(request: JudgeQuestionRequest): Promise<JudgeQuestionResult>;
 
   /**
    * Work out what to look for when the user asks about their records.

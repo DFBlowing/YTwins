@@ -68,11 +68,12 @@ const NO_EMBEDDING_ENDPOINT =
   '选了云端 embedding 但没有配置 YTwins_EMBEDDING_BASE_URL，向量算不出来：' +
   '词条之间不会有语义链接（同一次投递里的硬边不受影响）。';
 
-/** The seven operations that leave the machine, for the unavailable case. */
+/** The eight language-model operations that leave the machine, for the unavailable case. */
 const LLM_OPERATIONS = {
   respond: true,
   extract: true,
   judgeLink: true,
+  judgeQuestion: true,
   composeConclusion: true,
   composeAnswer: true,
   parseQuestion: true,
@@ -86,7 +87,7 @@ const EMBED_OPERATIONS = { embed: true } satisfies Record<keyof Embedder, true>;
  * An implementation whose every call fails with one reason.
  *
  * The list of operations is not written out here: it is read off the halves
- * above, and those are `satisfies Record<keyof …, true>` — so a ninth operation
+ * above, and those are `satisfies Record<keyof …, true>` — so a tenth operation
  * added to the port fails the type check until it is listed. Without that, a
  * new port method would simply be **absent** from a provider that already
  * cannot answer, and the failure would move from a legible message to

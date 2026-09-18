@@ -8,51 +8,56 @@
   </head>
   <body>
     <!--
-      三幕都接真实链路：丢真的落库、问真的检索到留档并指出出处、浮真的按冷却
-      与条数上限浮出一条。空的地方就渲染成空 —— 没有可说的一句时，浮现那一节
-      根本不会出现。
+      产品本身（15）：只有一个输入框。丢、问、浮不是三个页签，也不是用户要选的东西 ——
+      这句话是碎片、是在问一件留档里的事、还是在问一句关于自己的话，由**领域**判断
+      （`routing.ts`），页面只把领域给了什么摆出来。所以这里没有类型、没有时间、
+      也没有「问」的单独入口。
+
+      下面这几节仍然是第一幕那几节：一条投递 = 原话 + 回应 + 事项 + 词条，加上领域
+      这一轮决定要说的话（追溯的答复与出处，或者浮出来的那一条）；再往下是
+      「接下来要做的 / 连起来的词条 / 画像」。
+
+      三幕页在 `/demo.html`，一行没改，仍然是演示与回归的参照 —— 这一页与它共用同一个
+      领域接口，互不影响。
     -->
     <header class="topbar">
       <h1 class="brand">YTwins</h1>
-      <nav class="acts" aria-label="三幕">
-        <button class="act-tab" data-act="drop" aria-current="page">丢</button>
-        <button class="act-tab" data-act="ask">问</button>
-        <button class="act-tab" data-act="surface">浮</button>
+      <nav class="acts" aria-label="页面">
+        <a class="act-link" href="/demo.html">三幕 demo</a>
       </nav>
     </header>
 
     <main class="stage">
-      <!-- 第一幕：丢。 -->
-      <section class="act" data-act-panel="drop">
-        <p class="lede">把任何没格式的碎片丢进来。不用分类，不用填时间。</p>
+      <section class="act">
+        <p class="lede">
+          随口丢什么都进这一个框。是在丢一句碎片、问一件留档里说过的事，还是问一句关于你自己的话，由它自己分。
+        </p>
 
         <!--
-          演示模式的自述（13 的补丁）。替身只从一张写死的表里读，台词以外的内容它
-          读不出任何词条、也没有事项，回应只剩一句最平淡的「记下了。」—— 那看起来
-          像产品坏了，而不是像一场演示。所以这一句必须紧挨着输入框，不能只写在页尾
-          的 demo 一节里。真实模式（默认）下它不出现。
+          演示模式的自述（13 的补丁）：替身只从一张写死的表里读，台词以外的内容它读不出
+          词条、也没有事项，回应只剩一句最平淡的「记下了。」—— 那看起来像产品坏了，而不是
+          像一场演示。所以这一句紧挨着输入框。真实模式（默认）下它不出现。
         -->
         <p class="demo-notice" id="demo-notice" hidden></p>
 
-        <form class="drop-form" id="drop-form">
+        <form class="drop-form" id="deliver-form">
           <textarea
-            id="drop-input"
+            id="deliver-input"
             class="drop-input"
             name="body"
             rows="4"
             placeholder="不选类型、不填时间，直接丢"
             aria-label="投递内容"
           ></textarea>
-          <button type="submit" class="drop-send" id="drop-send">丢进去</button>
+          <button type="submit" class="drop-send" id="deliver-send">丢进去</button>
         </form>
 
-        <p class="reply" id="drop-reply" role="status" aria-live="polite"></p>
+        <p class="reply" id="deliver-status" role="status" aria-live="polite"></p>
 
         <!--
-          删除（09）。两步，而且第一步不能省：一段随手丢进来的话，事后可能正是
-          好几条小结论的地基，用户有权在动手之前知道这件事。所以「删」这个按钮
-          不删任何东西，它先把「有 N 条小结论是从它来的」摆出来，由用户选。
-          三个答案里「保留」也是答案 —— 看完预览决定不删，就是决定。
+          删除（09）。两步，而且第一步不能省：一段随手丢进来的话，事后可能正是好几条
+          小结论的地基，用户有权在动手之前知道这件事。所以「删」这个按钮不删任何东西，
+          它先把「有 N 条小结论是从它来的」摆出来，由用户选。
         -->
         <section class="removal" id="removal" role="alertdialog" aria-labelledby="removal-title" hidden>
           <h2 class="removal-title" id="removal-title">要删掉哪一次投递？</h2>
@@ -70,16 +75,20 @@
         <p class="removal-note" id="removal-note" role="status" aria-live="polite"></p>
 
         <!--
-          浮现（06）。只在这次投递带情绪、且确实有可说的一句时才出现 ——
-          它不主动推送，所以「什么都没有」时这一行根本不显示。
+          一条投递就是这一节里的一块：原话、它的回应、它接住的事项与词条，以及这一轮
+          产品自己决定要说的话（如果有）。最新的在最上面 —— 一个框的产品里，刚说的那句
+          应该在眼前，而不是在最下面。
         -->
-        <p class="surfaced surfaced-inline" id="drop-surface" role="status" aria-live="polite" hidden></p>
+        <section class="deliveries">
+          <h2 class="section-title">接住了什么</h2>
+          <ul class="drop-list" id="delivery-list"></ul>
+          <p class="empty" id="delivery-empty">还没有丢过东西。</p>
+        </section>
 
         <!--
-          排程（08）。打开页面就知道该做什么 —— 这是这一节的全部目的。
-          两列而不是一列：有时间的事项按时间排在前面，没解析出时间的事项
-          留在「待安排」里，不被丢掉、也不被硬塞一个日期。这里没有日历、
-          也不做冲突检测 —— 产品只说接下来有什么，不评价排得开排不开。
+          排程（08）。打开页面就知道该做什么 —— 这是这一节的全部目的。两列而不是一列：
+          有时间的事项按时间排在前面，没解析出时间的留在「待安排」里，不被丢掉、也不被
+          硬塞一个日期。
         -->
         <section class="schedule">
           <h2 class="section-title">接下来要做的</h2>
@@ -95,15 +104,9 @@
           <p class="empty" id="unscheduled-empty">没有待安排的事项。</p>
         </section>
 
-        <section class="caught">
-          <h2 class="section-title">接住了什么</h2>
-          <ul class="drop-list" id="drop-list"></ul>
-          <p class="empty" id="drop-empty">还没有丢过东西。</p>
-        </section>
-
         <!--
-          词条之间长出的链接（04）。积累过程用户看不见，但结果看得见 ——
-          每条连线都写着为什么连上、强度多少，否则一条说不清的线不值得信。
+          词条之间长出的链接（04）。积累过程用户看不见，但结果看得见 —— 每条连线都写着
+          为什么连上、强度多少，否则一条说不清的线不值得信。
         -->
         <section class="linked">
           <h2 class="section-title">连起来的词条</h2>
@@ -112,10 +115,9 @@
         </section>
 
         <!--
-          画像与结论链（05），以及用户能对它做的两件很轻的事（10）。画像就是这些小
-          结论本身，不是另一份藏起来的模型；结论链就是它们之间的承接与推翻关系。
-          沉淀不需要用户参与，所以这里只有两个动作：标某条不对，或在它旁边补一句
-          自己的话（那句话本身又是一次投递）。没有别的入口。
+          画像与结论链（05），以及用户能对它做的两件很轻的事（10）。画像就是这些小结论
+          本身，不是另一份藏起来的模型。沉淀不需要用户参与，所以这里只有两个动作：
+          标某条不对，或在它旁边补一句自己的话（那句话本身又是一次投递）。
         -->
         <section class="portrait">
           <h2 class="section-title">画像</h2>
@@ -127,132 +129,10 @@
         </section>
       </section>
 
-      <!-- 第二幕：问。07 填实：对留档提问，答得出，并指出它来自哪一次投递。 -->
-      <section class="act" data-act-panel="ask" hidden>
-        <p class="lede">对留档提问，得到回答并看到它来自哪一次投递。找不到时会直说没找到。</p>
-
-        <form class="ask-form" id="ask-form">
-          <input
-            id="ask-input"
-            class="ask-input"
-            name="question"
-            type="text"
-            placeholder="问一件留档里说过的事"
-            aria-label="问题"
-            autocomplete="off"
-          />
-          <button type="submit" class="ask-send" id="ask-send">问</button>
-        </form>
-
-        <!--
-          时间基准：demo 里「几天后」的视角。留空就是用现在 —— 这一项只影响
-          答案怎么措辞与怎么引用时间，不影响检索到哪几条。
-        -->
-        <div class="ask-basis">
-          <label class="ask-basis-label" for="ask-now">时间基准</label>
-          <input id="ask-now" class="ask-basis-input" type="datetime-local" />
-          <button type="button" class="ask-basis-set" id="ask-later">设为三天后</button>
-        </div>
-
-        <p class="ask-error" id="ask-error" role="alert"></p>
-
-        <section class="answer" id="ask-answer" hidden>
-          <p class="answer-text" id="ask-answer-text" role="status" aria-live="polite"></p>
-          <div class="answer-source">
-            <p class="answer-source-label">来自这几次投递：</p>
-            <ul class="answer-source-list" id="ask-source-list"></ul>
-          </div>
-        </section>
-
-        <p class="not-found" id="ask-not-found" hidden>留档里没有和这个问题相关的记录。</p>
-        <p class="not-found" id="ask-unavailable" hidden>这次没能查到留档，稍后再试试。</p>
-      </section>
-
-      <!-- 第三幕：浮。06 填实：情绪投递或主动询问时，浮出一条小结论；
-           11 让主动询问在沉淀出不止一条时，把它们汇成一句答案。 -->
-      <section class="act" data-act-panel="surface" hidden>
-        <p class="lede">
-          在情绪投递或你主动询问时，用不确定的语气浮出一条。同一件事 7 天内只浮一次，每轮最多一条。
-          主动问「你觉得我最近怎么样」时，如果已经沉淀出不止一条，它会把几条汇成一句答案，并列出这几条。
-        </p>
-
-        <!--
-          演示靠的是「同一件事被提起 3 次」：这里再丢一遍刚才那句（不必手打，
-          用的是这个库里的第一句原文），丢到第 3 次时浮现。要拿到一条**答案**
-          （多条小结论汇成一句），先把这件事丢够 3 次，再换一件事也丢 3 次
-          —— 下面输入框里给的那句是预置素材之一，它属于另一件事。
-        -->
-        <div class="surface-repeat">
-          <button type="button" class="surface-again" id="surface-again">再丢一次第一句</button>
-          <span class="surface-again-hint" id="surface-again-hint">先在「丢」里丢一句。</span>
-        </div>
-
-        <p class="demo-notice" id="surface-demo-notice" hidden></p>
-
-        <form class="drop-form" id="surface-form">
-          <textarea
-            id="surface-input"
-            class="drop-input"
-            name="body"
-            rows="3"
-            placeholder="也可以自己再丢一句"
-            aria-label="再丢一句"
-          ></textarea>
-          <button type="submit" class="drop-send" id="surface-send">再丢一句</button>
-        </form>
-
-        <p class="reply" id="surface-reply" role="status" aria-live="polite"></p>
-
-        <div class="surface-ask">
-          <button type="button" class="ask-send" id="surface-ask">问你一句：你觉得我最近怎么样</button>
-        </div>
-
-        <p class="surface-miss" id="surface-miss" hidden></p>
-
-        <section class="surfaced" id="surface-result" hidden>
-          <p class="surfaced-label" id="surface-label">浮出来的这一条</p>
-          <p class="surfaced-text" id="surface-text" role="status" aria-live="polite"></p>
-          <p class="surfaced-why" id="surface-why"></p>
-          <ul class="surfaced-support" id="surface-support"></ul>
-          <p class="surfaced-conclusions-label" id="surface-conclusions-label" hidden>它是由这几条汇成的：</p>
-          <ul class="surfaced-conclusions" id="surface-conclusions" hidden></ul>
-        </section>
-      </section>
-
-      <!--
-        三幕 demo（13）。只在服务端以 YTwins_PROVIDER=demo 起来时出现：台词由服务端
-        从预置素材里读出来（/api/demo），页面不抄第二份 —— 抄一份就会漂，而漂掉的
-        那一刻演示就不再是预置素材了。三幕要能连续重跑而结果不变，所以这里有一个
-        「重新开始演示」：先清空本机库，再把预置素材重新铺一遍。它和删除一样是两步
-        的 —— 一步就能清空整库的按钮，不值得放在一个随手点的地方。
-      -->
-      <section class="demo" id="demo" hidden>
-        <h2 class="section-title">三幕 demo</h2>
-        <p class="demo-note">
-          这台服务以演示模式运行：下面三句就是三幕的台词，由服务端从预置素材里读出来。第一幕丢第一句，第二幕问第二句，第三幕丢第三句。
-          <strong>它只认这三句</strong> —— 自己随手写的内容它读不出任何词条，也不会给出事项。
-        </p>
-        <ol class="demo-acts" id="demo-acts"></ol>
-        <p class="demo-warning">
-          「重新开始演示」会清空这台机器上的全部素材（投递、词条、链接、小结论、事项），再把预置素材重新铺一遍。这一步不能撤销。
-        </p>
-        <div class="demo-reset-row" id="demo-reset-row">
-          <button type="button" class="demo-reset" id="demo-reset">重新开始演示</button>
-        </div>
-        <div class="demo-confirm" id="demo-confirm" hidden role="alertdialog" aria-labelledby="demo-confirm-title">
-          <p class="demo-confirm-title" id="demo-confirm-title">确认清空本机素材，并重新铺上预置素材？</p>
-          <div class="demo-confirm-actions">
-            <button type="button" class="removal-go" id="demo-confirm-go">清空并重新开始</button>
-            <button type="button" class="removal-cancel" id="demo-cancel">保留</button>
-          </div>
-        </div>
-        <p class="demo-status" id="demo-status" role="status" aria-live="polite"></p>
-      </section>
-
       <!--
         数据边界（13）。产品唯一需要用户自己做取舍的事：哪部分数据会离开这台机器。
-        内容由服务端按这台机器实际的接线读出来（/api/privacy），页面不写死 —— 页面
-        写一套、服务端跑另一套，就是这条披露本身在骗人。读不到时它会说自己没读到，
+        内容由服务端按这台机器实际的接线读出来（/api/privacy），页面不写死 —— 页面写
+        一套、服务端跑另一套，就是这条披露本身在骗人。读不到时它会说自己没读到，
         而不是显示成「什么都不出去」。
       -->
       <section class="boundary" id="boundary">
@@ -265,6 +145,6 @@
       </section>
     </main>
 
-    <script type="module" src="/main.ts"></script>
+    <script type="module" src="/one-box.ts"></script>
   </body>
 </html>

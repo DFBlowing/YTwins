@@ -756,6 +756,40 @@ await check('composeRecallAnswer states the records as of the pinned moment', as
   assert.ok(material.includes('2026-09-20'), 'and the moment it is answering as of');
 });
 
+await check('judgeQuestion asks what the words are addressed to, and reads both arms back', async () => {
+  const asking = canned('{ "asks": true, "about": "self" }');
+  const judged = await asking.operations.judgeQuestion({
+    body: '你觉得我最近怎么样',
+    shape: 'question',
+  });
+  assert.deepEqual(judged, { asks: true, about: 'self' });
+  const system = systemOf(asking.calls[0]);
+  assert.ok(system.includes('question'), 'the shape ordinary code read is handed over as the reason for asking');
+  assert.ok(system.includes('records') && system.includes('self'), 'and both arms are named to the model');
+  assert.ok(userOf(asking.calls[0]).includes('你觉得我最近怎么样'), 'the words travel verbatim');
+
+  // The arm that is not an arm: 「下周三交提纲吗」 said to oneself. It needs no
+  // `about`, and a model that volunteered one anyway must not be read as having
+  // answered something it did not.
+  const notAsking = canned('{ "asks": false, "about": "records" }');
+  const denied = await notAsking.operations.judgeQuestion({
+    body: '下周三交提纲吗',
+    shape: 'unclear',
+  });
+  assert.deepEqual(denied, { asks: false }, 'a reading of "not a question" is the whole answer');
+});
+
+await check('an `about` nobody knows is refused, naming this call', async () => {
+  const { operations } = canned('{ "asks": true, "about": "the weather" }');
+  await assert.rejects(
+    () => operations.judgeQuestion({ body: '明天天气如何', shape: 'question' }),
+    (error: unknown) =>
+      error instanceof Error &&
+      error.message.includes('judgeQuestion') &&
+      error.message.includes('the weather'),
+  );
+});
+
 await check('every operation’s failure names the operation that failed', async () => {
   const { fetch } = recordingFetch(() => completion('我不太想回答这个。'));
   const client = createChatClient({
@@ -770,6 +804,7 @@ await check('every operation’s failure names the operation that failed', async
     ['respond', () => operations.respond({ body: 'x', brief: { emotionPresent: false, adviceRequested: false }, instructions: [] })],
     ['extract', () => operations.extract({ body: 'x' })],
     ['judgeLink', () => operations.judgeLink({ from: 'a', to: 'b', similarity: 0.8 })],
+    ['judgeQuestion', () => operations.judgeQuestion({ body: 'x', shape: 'question' })],
     ['composeConclusion', () => operations.composeConclusion({ anchor: 'a', terms: ['a'], tier: 'weak', instructions: [] })],
     ['composeAnswer', () => operations.composeAnswer({ conclusions: ['a'], terms: ['a'], tier: 'weak', instructions: [] })],
     ['parseQuestion', () => operations.parseQuestion({ question: 'x' })],
@@ -979,19 +1014,20 @@ function configFrom(env: Readonly<Record<string, string | undefined>>): Provider
   return resolveProviderConfig(env, { repoRoot: REPO_ROOT });
 }
 
-/** The eight operations the port declares, so a check can insist on all of them. */
+/** The nine operations the port declares, so a check can insist on all of them. */
 const PORT_OPERATIONS = [
   'respond',
   'extract',
   'embed',
   'judgeLink',
+  'judgeQuestion',
   'composeConclusion',
   'composeAnswer',
   'parseQuestion',
   'composeRecallAnswer',
 ] as const;
 
-await check('all eight operations are there, whichever halves are configured', () => {
+await check('all nine operations are there, whichever halves are configured', () => {
   const { provider } = createRealProvider({
     config: configFrom({ YTwins_LLM_API_KEY: 'sk-secret' }),
     fetch: recordingFetch(() => completion('{}')).fetch,
@@ -1020,6 +1056,7 @@ await check('a cloud LLM with no key is not a crash: each call says what is miss
       provider.respond({ body: 'x', brief: { emotionPresent: false, adviceRequested: false }, instructions: [] }),
     extract: () => provider.extract({ body: 'x' }),
     judgeLink: () => provider.judgeLink({ from: 'a', to: 'b', similarity: 0.8 }),
+    judgeQuestion: () => provider.judgeQuestion({ body: 'x', shape: 'question' }),
     composeConclusion: () =>
       provider.composeConclusion({ anchor: 'a', terms: ['a'], tier: 'weak', instructions: [] }),
     composeAnswer: () => provider.composeAnswer({ conclusions: ['a'], terms: ['a'], tier: 'weak', instructions: [] }),

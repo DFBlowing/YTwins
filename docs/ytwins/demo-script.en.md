@@ -28,8 +28,13 @@ $env:YTwins_PROVIDER = "demo"
 npm run server            # http://127.0.0.1:5273 by default
 ```
 
-Open `http://127.0.0.1:5273`. At the foot of the page a **Three-act demo** block appears
+Open `http://127.0.0.1:5273/demo.html`. At the foot of the page a **Three-act demo** block appears
 (holding the three lines below) and beside it the **what leaves this machine** block.
+
+> **The address changed with ticket 15.** The root path `/` is now **the product itself** — the page with
+> a single input box (see §8) — and the three-act page moved to `/demo.html` with not one line of it
+> changed. The three acts are the **demo's and the regression suite's reference**; the fused page is the
+> product.
 
 **Demo mode keeps its own library**: `data/demo.sqlite`. That is a different file from
 the `data/ytwins.sqlite` you normally use, so the reset button empties the former and
@@ -158,6 +163,7 @@ while the server ran another is that disclosure lying to itself.
 node src/domain/domain.test.ts     # the domain, including "the acts run twice and match"
 node src/ai/provider.test.ts       # the real provider's wiring (no network)
 node tools/e2e-ticket-13.mjs       # the acts over real HTTP (demo mode, and the real server's boundary)
+node tools/e2e-ticket-15.mjs       # the one box over real HTTP (all four routings, and both addresses)
 node tools/e2e-ticket-02.mjs       # … the 02–11 regression scripts, one at a time
 npm run typecheck
 npm run build:web                  # only after changing src/web/
@@ -176,3 +182,38 @@ Both routes were run before ticket 13 was implemented (the record is in the tick
 
 So: **the demo runs on the preset provider, and the product still defaults to the real one** (leave
 `YTwins_PROVIDER` unset for real). The real chain's manual smoke is `npm run smoke`.
+
+## 8. The product itself: one box (ticket 15)
+
+The other page on the same server: the root path, `http://127.0.0.1:5273/`. **One input box** — no tabs,
+no separate way in for 「问」, no controls for type or time. Whether the words are a fragment, a question
+about something in the **records**, or a question about **you** is decided by the **domain**
+(`src/domain/routing.ts` plus the port's `judgeQuestion`), and the page only shows what came of it.
+
+One look at each of the four kinds of input (a fragment counts twice — with and without a feeling, which is why
+the table has five rows; in demo mode only the script's own lines read, so of the first three rows only act one's
+line and act two's question can be shown):
+
+| What goes in | What you should see |
+|---|---|
+| a fragment, no feeling | just the reply, plus the items and terms it yielded |
+| a fragment carrying a feeling | the same, **plus** the one line the moment surfaced |
+| a question about something really said (e.g. 「期末怎么算分」) | 「留档里是这么说的」 + the answer + **来自这几次投递** with the originals; **no judgement** is pushed this turn |
+| a question about something never said (e.g. 「上周的会议纪要放哪了」) | a plain "the records do not cover this"; again, no judgement |
+| a question about the user (e.g. 「你觉得我最近怎么样」) | 「把几条汇成的一句」 when two or more conclusions can be assembled, and the fallback of one surfaced line when they cannot |
+
+**When it cannot tell, it does not guess**: a turn that cannot be judged a question is not treated as one —
+better to say one line less than to answer a thought spoken aloud as though it were a question. Code reads
+the shape first (a question mark, or a phrase like 「怎么」/「为什么」/「哪」) and only hands the unclear cases
+to a model; where the shape is a trailing 「吗」/「呢」 the drop's own **input type** decides, so a feeling
+worded that way — 「下周三交提纲吗」 — stays a fragment.
+
+**What demo mode can show on this page**: act one's line (a fragment with a feeling → surfaced) and act
+two's question (→ recall, with its source). **A question about yourself cannot be shown** — the preset
+table has no such line, so it reads as a fragment — and nothing off script reads at all; the page says so
+above its box. To see all four routings, use the real provider.
+
+**This page keeps no conversation**: a recall answer and a surfaced line belong to **the moment they were
+said** and live only in that session's page; after a refresh what remains is the delivery itself (the
+original, its reply, its items, its terms) and the portrait. That is deliberate — this product is
+**陪伴**, not 陪聊.

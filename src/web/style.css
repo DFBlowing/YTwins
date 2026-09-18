@@ -1088,3 +1088,91 @@ body {
 .boundary-problem:empty {
   display: none;
 }
+
+/*
+ * The one box (15). This stylesheet serves both pages — the product's own page at
+ * `/` and the three-act page at `/demo.html` — so everything below is additive:
+ * the classes the three-act page uses are untouched, and these are only ever
+ * rendered on the product's page.
+ */
+
+/* The way across to the three-act page, in the top bar where the tabs used to
+   be. A link rather than a control: it opens a different page, and it is there
+   for the demo rather than for the product. */
+.act-link {
+  padding: 0.35rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--ink-soft);
+  font-size: 0.95rem;
+  text-decoration: none;
+}
+
+.act-link:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* What the domain decided to say after one delivery: 追溯 (the user's own
+   records, cited) or 浮现 (a judgement, with the numbers its wording was read
+   off). Set inside the delivery it belongs to, because it is the rest of the
+   same answer to the same words — not a section of its own. */
+.speech {
+  margin: 0.75rem 0 0;
+  padding: 0.7rem 0.9rem;
+  border-left: 3px solid var(--accent);
+  background: var(--paper);
+}
+
+/* A question put to the records is a fact being read back, so it is drawn
+   against the user's own words — quoted, the same way the three-act page quotes
+   a source. */
+.speech-recall {
+  background: #fff;
+  border-left-color: var(--accent);
+}
+
+.speech-label {
+  margin: 0;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--ink-soft);
+}
+
+.speech-label:empty {
+  display: none;
+}
+
+/* Larger than the drop's own reply: this is the product answering, and the
+   sentence is the thing to read. */
+.speech-text {
+  margin: 0.35rem 0 0;
+  font-size: 1.05rem;
+  word-break: break-word;
+}
+
+.speech-why {
+  margin: 0.35rem 0 0;
+  font-size: 0.8rem;
+  color: var(--ink-soft);
+}
+
+/* "Nothing this time" is an ordinary outcome, not a fault: quoted plainly and
+   never coloured, the same reading the three-act page's act three takes. */
+.speech-miss {
+  margin: 0;
+  color: var(--ink-soft);
+}
+
+.speech-source-label {
+  margin: 0.8rem 0 0.4rem;
+  font-size: 0.8rem;
+  letter-spacing: 0.04em;
+  color: var(--ink-soft);
+}
+
+/* The delivery list. Newest first, so the thing just said is at the top. */
+.deliveries {
+  margin-top: 2.5rem;
+}

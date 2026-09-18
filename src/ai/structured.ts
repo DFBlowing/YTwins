@@ -255,6 +255,59 @@ export function requireBoolean(
 }
 
 /**
+ * The member of a fixed set that a value names, or a diagnosable failure.
+ *
+ * The one place a "which of these is it" field is read, so the two callers below
+ * cannot come apart: a value outside the set is refused rather than mapped onto
+ * the nearest member, because every such field decides something about the user
+ * and "we picked whichever was closest" is the product inventing a reading.
+ *
+ * @param value - what the model put in the field.
+ * @param field - the field's name, for the error message.
+ * @param choices - the values the domain understands.
+ * @param operation - the operation, for the error message.
+ * @returns the matching member of `choices`.
+ */
+function matchChoice<T extends string>(
+  value: unknown,
+  field: string,
+  choices: readonly T[],
+  operation: string,
+): T {
+  if (typeof value !== 'string') {
+    throw new ProviderCallError(
+      `模型在 ${operation} 里给出的 ${field} 不是一个字符串：${describe(value)}`,
+    );
+  }
+  const trimmed = value.trim();
+  const known = choices.find((candidate) => candidate === trimmed);
+  if (known === undefined) {
+    throw new ProviderCallError(
+      `模型在 ${operation} 里给出的 ${field} 是「${trimmed}」，不在 ${choices.join(' / ')} 里。`,
+    );
+  }
+  return known;
+}
+
+/**
+ * One of a fixed set of strings.
+ *
+ * @param object - the parsed answer.
+ * @param field - the field to read.
+ * @param choices - the values the domain understands.
+ * @param operation - the operation, for the error message.
+ * @returns the matching member of `choices`.
+ */
+export function requireChoice<T extends string>(
+  object: Record<string, unknown>,
+  field: string,
+  choices: readonly T[],
+  operation: string,
+): T {
+  return matchChoice(fieldOf(object, field, operation), field, choices, operation);
+}
+
+/**
  * One of the four input types.
  *
  * Refused rather than approximated when it is something else, and that is a
@@ -262,6 +315,10 @@ export function requireBoolean(
  * what decides whether a drop is a **moment** the product speaks after
  * (`emotion`), so guessing one would either silence a moment that should have
  * happened or invent one that should not.
+ *
+ * Matched case-insensitively, unlike `requireChoice`: its values are ordinary
+ * words a model may capitalise, while the other sets are tokens this product
+ * writes itself. That one difference is the whole of what this adds.
  *
  * @param object - the parsed answer.
  * @param field - the field to read.
@@ -274,17 +331,10 @@ export function requireInputType(
   operation: string,
 ): InputType {
   const value = fieldOf(object, field, operation);
-  if (typeof value !== 'string') {
-    throw new ProviderCallError(
-      `模型在 ${operation} 里给出的 ${field} 不是一个输入类型：${describe(value)}`,
-    );
-  }
-  const normalised = value.trim().toLowerCase();
-  const known = INPUT_TYPES.find((candidate) => candidate === normalised);
-  if (known === undefined) {
-    throw new ProviderCallError(
-      `模型在 ${operation} 里给出的 ${field} 是「${value.trim()}」，不在 ${INPUT_TYPES.join(' / ')} 里。`,
-    );
-  }
-  return known;
+  return matchChoice(
+    typeof value === 'string' ? value.trim().toLowerCase() : value,
+    field,
+    INPUT_TYPES,
+    operation,
+  );
 }

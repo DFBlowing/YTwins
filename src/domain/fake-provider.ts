@@ -20,7 +20,10 @@
  * the domain decided a matter was about. Ticket 11 adds the asked-for **answer**
  * as a script of its own, so a check can make the assembly fail while every
  * single matter still composes — which is what "an answer nobody could compose
- * did not become an invented one" is asserted with.
+ * did not become an invented one" is asserted with. Ticket 15 adds the judgement
+ * the fused page needs: what one piece of text was addressed to. It is scripted
+ * per body like the rest, and deliberately **unscripted by default** — the fake
+ * will not decide the routing a check meant to pin.
  *
  * @module domain/fake-provider
  */
@@ -39,6 +42,8 @@ import type {
   ExtractResult,
   JudgeLinkRequest,
   JudgeLinkResult,
+  JudgeQuestionRequest,
+  JudgeQuestionResult,
   ParseQuestionRequest,
   ParseQuestionResult,
   RespondRequest,
@@ -46,6 +51,7 @@ import type {
 } from './ai-provider.ts';
 import type { InputType } from './interface.ts';
 import { pairKey } from './linking.ts';
+import type { QuestionTarget } from './routing.ts';
 
 /**
  * How a scripted call fails or stalls.
@@ -121,6 +127,19 @@ export type ParseQuestionScript =
   | FailureScript
   | { readonly kind: 'match'; readonly matchText: readonly string[] };
 
+/**
+ * What the fake should make of words that could be a question.
+ *
+ * Three scripts rather than a boolean, because "not a question" and "nobody could
+ * say" are different facts and ticket 15 turns on the difference: the first is a
+ * reading, the second is the arm the domain has to fall back to
+ * (`判不出是问题，就不当问题`). `FailureScript` is how a check pins the second.
+ */
+export type JudgeQuestionScript =
+  | FailureScript
+  | { readonly kind: 'asking'; readonly about: QuestionTarget }
+  | { readonly kind: 'not-asking' };
+
 /** What the fake should answer, once records have been found. */
 export type ComposeScript = FailureScript | { readonly kind: 'answer'; readonly answer: string };
 
@@ -144,6 +163,7 @@ export type AnyScript =
   | RespondScript
   | ExtractScript
   | ParseQuestionScript
+  | JudgeQuestionScript
   | ComposeScript
   | EmbedScript
   | JudgeLinkScript
@@ -177,6 +197,19 @@ export interface FakeProviderScript {
   /** What to make of a question. Omitting it means every question yields no cues. */
   readonly parseQuestionFallback?: ParseQuestionScript;
   readonly parseQuestionByQuestion?: Readonly<Record<string, ParseQuestionScript>>;
+  /**
+   * What to make of words that could be a question. Keyed by the body itself,
+   * so a check can script one sentence as a question about the records and
+   * another as a question about the user.
+   *
+   * Omitting it makes the call **fail**, like the other readings: whether the
+   * words are a question is a judgement, and a fake that defaulted one would be
+   * inventing the routing the check meant to pin. The domain reads the failure
+   * as 「not a question」, which is the outcome it promises for a judgement nobody
+   * could make.
+   */
+  readonly judgeQuestionFallback?: JudgeQuestionScript;
+  readonly judgeQuestionByBody?: Readonly<Record<string, JudgeQuestionScript>>;
   /** How to reply to a question, once records have been found. */
   readonly composeFallback?: ComposeScript;
   /**
@@ -257,6 +290,14 @@ export interface FakeProvider extends AiProvider {
   readonly read: readonly string[];
   /** Every question the domain asked it to parse, in order. */
   readonly askedQuestions: readonly string[];
+  /**
+   * Every piece of text the domain asked it to judge as a question, in order.
+   *
+   * The observation ticket 15's checks are built on: a routing that never asked
+   * and a routing that asked and got "no" produce the same delivery, and only
+   * this tells them apart.
+   */
+  readonly classified: readonly JudgeQuestionRequest[];
   /** Every text the domain asked it to encode, in order. */
   readonly embedded: readonly string[];
   /** Every pair the domain put to `judgeLink`, in the order it asked. */
@@ -347,6 +388,28 @@ function runParseQuestion(script: ParseQuestionScript | undefined): Promise<Pars
   return Promise.resolve({ matchText: script.matchText });
 }
 
+/**
+ * What an unscripted judgement of "is this a question" does.
+ *
+ * It **fails**, and that is the honest default rather than a convenient one: a
+ * fake that answered "not a question" on its own would be making the routing
+ * decision the check meant to make, and a check asserting "a fragment gets no
+ * judgement" would then pass for a reason it never set up. The domain reads the
+ * failure as a fragment, which is the same outcome — so nothing is harder to
+ * write, and the arm that says "nobody could say" stays reachable.
+ */
+function runJudgeQuestion(script: JudgeQuestionScript | undefined): Promise<JudgeQuestionResult> {
+  if (script === undefined) {
+    return Promise.reject(
+      new Error('no question script: the fake will not decide what the words were addressed to'),
+    );
+  }
+  if (isFailure(script)) return fail(script);
+  return Promise.resolve(
+    script.kind === 'asking' ? { asks: true, about: script.about } : { asks: false },
+  );
+}
+
 function runCompose(script: ComposeScript | undefined): Promise<ComposeRecallAnswerResult> {
   if (script === undefined) {
     // Unscripted composition **fails** rather than answering. Composing is the
@@ -405,6 +468,7 @@ export function createFakeProvider(script: FakeProviderScript = {}): FakeProvide
   const seen: string[] = [];
   const read: string[] = [];
   const askedQuestions: string[] = [];
+  const classified: JudgeQuestionRequest[] = [];
   const embedded: string[] = [];
   const judged: JudgedPair[] = [];
   const composed: ComposeConclusionRequest[] = [];
@@ -419,6 +483,7 @@ export function createFakeProvider(script: FakeProviderScript = {}): FakeProvide
     seen,
     read,
     askedQuestions,
+    classified,
     embedded,
     judged,
     composed,
@@ -449,6 +514,12 @@ export function createFakeProvider(script: FakeProviderScript = {}): FakeProvide
       askedQuestions.push(request.question);
       return runParseQuestion(
         script.parseQuestionByQuestion?.[request.question] ?? script.parseQuestionFallback,
+      );
+    },
+    judgeQuestion(request: JudgeQuestionRequest): Promise<JudgeQuestionResult> {
+      classified.push(request);
+      return runJudgeQuestion(
+        script.judgeQuestionByBody?.[request.body] ?? script.judgeQuestionFallback,
       );
     },
     composeRecallAnswer(

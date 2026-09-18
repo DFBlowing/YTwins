@@ -1,15 +1,16 @@
 /**
- * The language model half of the port: seven of the eight operations.
+ * The language model half of the port: eight of the nine operations.
  *
- * The eighth, `embed`, is not here and never will be: it is the one thing the
+ * The ninth, `embed`, is not here and never will be: it is the one thing the
  * product deliberately keeps on the user's own machine (see the spec's frozen
  * decision), so it is built separately and joined on afterwards. What is left
  * is every operation that asks a model to **read or write language** — answering
- * a drop, reading items and terms out of one, settling a pair of wordings,
- * putting a matter into a sentence, bringing several conclusions together,
- * working out what a question is about, and replying to it from the records.
+ * a drop, reading items and terms out of one, judging what the words were
+ * addressed to, settling a pair of wordings, putting a matter into a sentence,
+ * bringing several conclusions together, working out what a question is about,
+ * and replying to it from the records.
  *
- * Three things are the same for all seven, and each is a decision rather than a
+ * Three things are the same for all eight, and each is a decision rather than a
  * convenience:
  *
  *  - **The rules come from the request.** Parent-voice and conclusion rules are
@@ -47,16 +48,20 @@ import type {
   ExtractResult,
   JudgeLinkRequest,
   JudgeLinkResult,
+  JudgeQuestionRequest,
+  JudgeQuestionResult,
   ParseQuestionRequest,
   ParseQuestionResult,
   RespondRequest,
   RespondResult,
 } from '../domain/ai-provider.ts';
+import { QUESTION_TARGETS } from '../domain/routing.ts';
 import type { ChatClient, ChatMessage } from './openai-chat.ts';
 import {
   optionalString,
   requireArray,
   requireBoolean,
+  requireChoice,
   requireInputType,
   requireObject,
   requireString,
@@ -147,7 +152,7 @@ function readItems(object: Record<string, unknown>, what: string): ExtractedItem
 }
 
 /**
- * Build the seven language-model operations.
+ * Build the eight language-model operations.
  *
  * @param options - the transport, and optionally the clock.
  * @returns the operations, ready to be joined with an embedding.
@@ -222,6 +227,40 @@ export function createLlmOperations(options: LlmProviderOptions): LlmOperations 
         terms: requireStringArray(object, 'terms', 'extract').filter((term) => term.length > 0),
         anchor: optionalString(object, 'anchor', 'extract'),
       };
+    },
+
+    async judgeQuestion(request: JudgeQuestionRequest): Promise<JudgeQuestionResult> {
+      const object = await client.askJson(
+        [
+          {
+            role: 'system',
+            content: systemPrompt([
+              PRODUCT_CONTEXT,
+              '任务：判断用户刚说的这段话是不是在向你提问，以及问的是哪一类。',
+              [
+                '口径：',
+                '- 只有他**在问你、等你回答**时才算提问。记录一件事、说一句心情、随口念叨，都不算。',
+                '- 问一件过去说过的事（「期末怎么算分」），about 写 records：答案在他自己的记录里。',
+                '- 问你怎么看他（「你觉得我最近怎么样」），about 写 self：答案是你要形成的判断。',
+                '- 拿不准就当不是提问：宁可少说一句，也不要把自言自语当成提问。',
+              ].join('\n'),
+              `普通代码从这段话里读出的形状是 ${request.shape}（question＝他自己标了问号或用了一望即知的提问说法，unclear＝只是句尾带「吗／呢」）。这只是线索，不是结论。`,
+              '输出 JSON，形如：{"asks": true, "about": "records"}；不是提问就写 {"asks": false}',
+              OUTPUT_RULE,
+            ]),
+          },
+          { role: 'user', content: request.body },
+        ],
+        'judgeQuestion',
+      );
+
+      // A reading that says "not a question" needs nothing else, and deliberately
+      // does not have to supply an `about`: the arm that is not an arm is the one
+      // the domain treats a blank answer as, so a model that answers
+      // `{"asks": false, "about": "records"}` is not asked to be coherent about a
+      // field that means nothing here.
+      if (!requireBoolean(object, 'asks', 'judgeQuestion')) return { asks: false };
+      return { asks: true, about: requireChoice(object, 'about', QUESTION_TARGETS, 'judgeQuestion') };
     },
 
     async judgeLink(request: JudgeLinkRequest): Promise<JudgeLinkResult> {

@@ -80,6 +80,32 @@ async function readBody(request: IncomingMessage, limitBytes = 64 * 1024): Promi
 }
 
 /**
+ * The words a POST is carrying, or null when it carries none.
+ *
+ * One reader for both routes that take the user's own text — dropping it and
+ * delivering it — because the two have the same contract: a body that is not a
+ * string, or is blank, is refused with a 400 and the same sentence. A second
+ * copy of that reading is a second place for the two to disagree about what
+ * "empty" means.
+ *
+ * @param request - the request being read.
+ * @param response - the response, so the refusal can be answered here.
+ * @returns the text, or null when a 400 has already been sent.
+ */
+async function readWords(
+  request: IncomingMessage,
+  response: ServerResponse,
+): Promise<string | null> {
+  const parsed = JSON.parse(await readBody(request)) as { body?: unknown };
+  const body = typeof parsed.body === 'string' ? parsed.body : '';
+  if (body.trim().length === 0) {
+    sendJson(response, 400, { error: '投递内容是空的' });
+    return null;
+  }
+  return body;
+}
+
+/**
  * Resolve a URL path to a regular file inside the built page, or null.
  *
  * Containment is checked after normalising, so a crafted path cannot escape the
@@ -147,20 +173,42 @@ export function createHandler(domain: Domain, options: HandlerOptions = {}) {
   return async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const url = request.url ?? '/';
 
-    // Drop one piece of text. The page's only write.
+    // Drop one piece of text. The three-act page's write.
     if (request.method === 'POST' && url === '/api/drop') {
       try {
-        const parsed = JSON.parse(await readBody(request)) as { body?: unknown };
-        const body = typeof parsed.body === 'string' ? parsed.body : '';
-        if (body.trim().length === 0) {
-          sendJson(response, 400, { error: '投递内容是空的' });
-          return;
-        }
+        const body = await readWords(request, response);
+        if (body === null) return;
         const result = await domain.drop(body);
         // The id travels back because the items are not known yet: extraction
         // is asynchronous to recording, so the page asks about this drop again
         // rather than being made to wait for an answer that may never come.
         sendJson(response, 200, { id: result.id, body: result.body, reply: result.reply });
+      } catch (error) {
+        sendJson(response, 500, {
+          error: error instanceof Error ? error.message : '投递失败',
+        });
+      }
+      return;
+    }
+
+    // Hand the product one piece of text, and get everything that follows from it
+    // (ticket 15). The fused page's only write, and the reason it is its own
+    // route: whether the words were a fragment, a question about the user's
+    // records, or a question about the user is the **domain's** rule, so the page
+    // hands the words over once and shows what came back rather than stitching
+    // `drop` + `recall` + `surface` together itself.
+    //
+    // It answers with more than a drop: the original, its reply, what it caught,
+    // and whichever of 追溯 and 浮现 the domain decided this delivery was. A
+    // question that could not be put to the records is a 200 with that fact in
+    // it, not an error status — the honest outcome is a fact about the material
+    // or about the attempt, and turning either into a failure would push the page
+    // towards showing a problem where the product said something true.
+    if (request.method === 'POST' && url === '/api/deliver') {
+      try {
+        const body = await readWords(request, response);
+        if (body === null) return;
+        sendJson(response, 200, await domain.deliver(body));
       } catch (error) {
         sendJson(response, 500, {
           error: error instanceof Error ? error.message : '投递失败',

@@ -87,10 +87,22 @@
  * shows the one line it would have shown anyway: nothing is dressed up, and
  * nobody who asked a direct question is met with silence.
  *
+ * Ticket 15 gives all of the above its **one front door**. Dropping, asking and
+ * surfacing were three operations, and telling them apart was left to whoever
+ * called them — which in practice meant the page, in the one place this product
+ * does not allow decisions to live. `deliver` makes that reading here instead:
+ * the words are stored and answered first, then read, then routed by ordinary
+ * code and, where only meaning can settle it, by the port's `judgeQuestion`
+ * (`routing.ts`), and what follows is the arm the routing chose — 追溯 for a
+ * question about the records, the visible moment for a question about the user,
+ * and nothing beyond the drop's own reply for a fragment. The three doings
+ * themselves are untouched: same `drop`, same `recall`, same moment with its
+ * cooldown and its cap. What is new is the decision, and that it is made here.
+ *
  * @module domain/core
  */
 
-import type { AiProvider, ExtractResult } from './ai-provider.ts';
+import type { AiProvider, ExtractResult, JudgeQuestionResult } from './ai-provider.ts';
 import {
   CONCLUSION_INSTRUCTIONS,
   CORRECTION_LINE,
@@ -116,9 +128,12 @@ import type {
   DeletionMode,
   DeletionPreview,
   DeletionResult,
+  Delivery,
+  DeliverySpeech,
   Domain,
   DropResult,
   DropSummary,
+  InputType,
   Item,
   ItemState,
   LinkedTerm,
@@ -153,6 +168,7 @@ import {
   type ReplySituation,
 } from './parent-voice.ts';
 import { upcomingFrom } from './scheduling.ts';
+import { readQuestionShape, type DeliveryRoute, type QuestionShape } from './routing.ts';
 import type {
   DropStore,
   MatterDrop,
@@ -553,6 +569,37 @@ export function createDomain(options: DomainCoreOptions): Domain {
 
   /** The timer that carries "wait for it to go quiet" without anyone watching. */
   let quietTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * The reading in flight for each drop, so two asks join one reading.
+   *
+   * Extraction is asynchronous to recording, which means a drop is normally
+   * being read by the time anyone could ask about it — `deliver` awaits that
+   * reading, and a page retrying `extract` may arrive while it is still running.
+   * Without this, both callers would reach the provider and both would write what
+   * they got: the store converges (it clears before it writes), so nothing would
+   * break — but the user would pay for the same reading twice, and the second
+   * write could land after a term had already been linked to the first one's.
+   *
+   * Held by drop id and forgotten as soon as the reading settles. A reading that
+   * failed is not remembered: asking again is exactly what a caller retrying
+   * after an outage is for.
+   */
+  const readings = new Map<string, Promise<void>>();
+
+  /**
+   * Read one drop once, however many callers ask at the same time.
+   *
+   * @param drop - the drop as last read.
+   * @returns when the reading has been attempted.
+   */
+  function ensureRead(drop: StoredDrop): Promise<void> {
+    const running = readings.get(drop.id);
+    if (running !== undefined) return running;
+    const started = extractInto(drop).finally(() => readings.delete(drop.id));
+    readings.set(drop.id, started);
+    return started;
+  }
 
   /**
    * Read one drop, and write down what was read.
@@ -1900,12 +1947,17 @@ export function createDomain(options: DomainCoreOptions): Domain {
    * whole point of that sentence is that it is **a drop like any other**, and a
    * second path into the store would be a second set of guarantees to keep.
    *
+   * Ticket 15 adds the second caller and the reason this hands back the **row**
+   * rather than the line: `deliver` routes on the input type the reading judged,
+   * and it may not go behind the store's back to find it. Both callers go through
+   * here so the guarantees stay in one place.
+   *
    * @param body - the raw text the user typed. Stored verbatim.
    * @param pinnedMatterId - the matter the user wrote it beside, or null for a
    *   drop typed at the top, which the ordinary attachment rules place.
-   * @returns what this drop caught, and the reply to show the user.
+   * @returns the drop as it was just written.
    */
-  async function recordDrop(body: string, pinnedMatterId: string | null): Promise<DropResult> {
+  async function recordStored(body: string, pinnedMatterId: string | null): Promise<StoredDrop> {
     // What this drop asks of its reply, read once and used for two things:
     // the line to answer with now, and what the provider is told later.
     const situation = readSituation(body);
@@ -1943,19 +1995,362 @@ export function createDomain(options: DomainCoreOptions): Domain {
     // bare `provider.extract(...)` guarded by `.catch(...)`. Awaiting inside
     // `extractInto` also means the reply is composed only after the drop row
     // exists, so it cannot race the store.
-    void extractInto(stored);
+    void ensureRead(stored);
 
     // Compose the styled reply to what the user just said. Like extraction, it
     // does not gate the drop: it replaces the line the drop was caught with,
     // and only if it passes the parent-voice checks.
     void replyInto(stored, situation);
 
-    return { body: stored.body, reply: stored.reply ?? safe, id: stored.id };
+    return stored;
+  }
+
+  /**
+   * Record one drop and answer with what a caller of `drop` wants.
+   *
+   * The one line rather than the row: `drop`'s contract is "your words are safe
+   * and here is what you are told about them", and it deliberately carries
+   * nothing a caller could read the drop's later state out of.
+   *
+   * @param body - the raw text the user typed. Stored verbatim.
+   * @param pinnedMatterId - the matter the user wrote it beside, or null.
+   * @returns what this drop caught, and the reply to show the user.
+   */
+  async function recordDrop(body: string, pinnedMatterId: string | null): Promise<DropResult> {
+    const stored = await recordStored(body, pinnedMatterId);
+    return {
+      body: stored.body,
+      reply: stored.reply ?? safeLineFor(stored.body),
+      id: stored.id,
+    };
+  }
+
+  /**
+   * What a caller may pin when the records are being asked, and one thing only
+   * the domain may add.
+   *
+   * `withoutDropId` is deliberately **not** on the interface's `RecallOptions`:
+   * which drop is *asking* is knowledge only a delivery has, and a caller that
+   * could name one could silence a record for no reason the product would ever
+   * have. What it prevents is narrower than it looks — without it, the words the
+   * user just typed would be the most literal match for their own question, and
+   * the answer would cite the question back to them.
+   */
+  interface RecallScope extends RecallOptions {
+    /** The drop asking, which is not one of its own sources. */
+    readonly withoutDropId?: string;
+  }
+
+  /**
+   * Ask a question of the user's **records** — the operation, without the
+   * interface's signature around it.
+   *
+   * Pulled out of the returned object for one reason: a delivery reaches it
+   * (ticket 15's `recall` arm answers a question about the records here), and a
+   * second implementation of the same reading would be a second set of
+   * guarantees to keep.
+   *
+   * @param question - the question as typed.
+   * @param options - optionally, the moment to answer as of, and the drop asking.
+   * @returns the answer and its sources, or an explicit failure.
+   */
+  async function recallFrom(question: string, options?: RecallScope): Promise<RecallResult> {
+    // No provider means the question cannot be put to the records at all. That
+    // is `unavailable`, not `not-found`: nothing was searched, so claiming the
+    // records do not cover the question would be a claim about the user's own
+    // data that nobody checked.
+    if (provider === undefined) return { kind: 'unavailable' };
+
+    // What to look for. The model reads the question; it does not read the
+    // records, and it never decides whether an answer exists.
+    let matchText: readonly string[];
+    try {
+      matchText = (await provider.parseQuestion({ question })).matchText;
+    } catch {
+      // A provider that is down, refuses, or blows up must not become an
+      // invented answer, and must not be reported as a fact about the data.
+      return { kind: 'unavailable' };
+    }
+
+    // Blank entries are discarded before matching. A model that returned `['']`
+    // or whitespace would otherwise match every drop, since every string
+    // contains the empty string — turning "I have nothing to look for" into
+    // "everything answers this question", which is exactly backwards.
+    const wanted = matchText.map((text) => text.trim()).filter((text) => text.length > 0);
+    if (wanted.length === 0) return { kind: 'not-found' };
+
+    // Selection is plain code, not a model call: a drop matches when any of
+    // the text appears in it. That is what makes "found nothing" a fact about
+    // the data rather than an opinion, and the same question recalls the same
+    // records every time. `listDrops` is oldest-first, so this order is stable.
+    //
+    // The drop that IS the question is left out: what the user just typed is not
+    // part of their material, and their own question is the most literal match
+    // it will ever have.
+    const sources: readonly RecallSource[] = (await store.listDrops())
+      .filter((drop) => drop.id !== options?.withoutDropId)
+      .filter((drop) => wanted.some((text) => drop.body.includes(text)))
+      .map(toRecallSource);
+    if (sources.length === 0) return { kind: 'not-found' };
+
+    // The moment to answer *as of*. Pinned by the caller for the demo's
+    // "a few days later" viewpoint, otherwise now. It reaches the composer
+    // only, so it can change how the answer reads but never what was found.
+    const at = options?.now ?? new Date().toISOString();
+
+    let answer: string;
+    try {
+      answer = (await provider.composeRecallAnswer({ question, records: sources, now: at })).answer;
+    } catch {
+      return { kind: 'unavailable' };
+    }
+
+    // An answer of nothing is not an answer. Without this, a provider
+    // returning whitespace would produce `kind: 'answered'` with an empty line
+    // beside a source — the exact confusion this result shape exists to rule
+    // out — so it is refused here rather than rendered.
+    if (answer.trim().length === 0) return { kind: 'unavailable' };
+
+    // Every match is cited, not one chosen "main" source: the composer was
+    // handed all of them and may have drawn on any, so naming a single drop
+    // could show the user an original the answer did not come from. Checking
+    // the answer against the original is the reason a source is shown at all.
+    return { kind: 'answered', answer, sources };
+  }
+
+  /**
+   * Ask the product to speak first — the operation, without the interface's
+   * signature around it.
+   *
+   * Pulled out of the returned object for the same reason as `recallFrom`:
+   * `deliver` reaches it twice (a fragment's moment, and the moment that answers
+   * a question about the user), and it is the one place the cooldown, the
+   * one-line-per-turn cap and the dice are held.
+   *
+   * @param options - the drop that raised the moment, or nothing when the user asked.
+   * @returns the one thing shown, or the ordinary reason there is none.
+   */
+  async function surfaceFrom(options?: SurfacingOptions): Promise<SurfacingResult> {
+    // The trigger, read before anything else runs. A drop the product does not
+    // speak after is not a moment, and no look is forced on its account — see
+    // `isAMoment` for what makes one.
+    const dropId = options?.dropId;
+    if (dropId !== undefined) {
+      const drop = await store.findDrop(dropId);
+      // A drop nobody recorded is not a moment either: nothing arrived to
+      // speak after.
+      if (drop === null || !isAMoment(drop)) {
+        return { kind: 'none', reason: 'not-a-moment' };
+      }
+    }
+
+    // Judged now rather than whenever the invisible look would have come round:
+    // the moment is the user's, and what they are about to read has to count
+    // the last few fragments. It goes through the one look queue, so two
+    // attempts in the same breath cannot each spend the alternation's turn.
+    await queueLook(settle);
+
+    const at = now();
+    const ready = await readySurfacings(at);
+    if (ready.kind === 'none') return ready;
+    const candidates = ready.candidates;
+
+    // The asked-for **answer**: several conclusions brought together into one
+    // sentence rather than one of them shown. Only a question is answered this
+    // way — a drop gets the one line that belongs to the moment it just made —
+    // and it is the same moment otherwise, which is what keeps the cooldown and
+    // the one-line-per-turn cap true of both: they cannot each produce
+    // something in a turn they share.
+    //
+    // Null means "there is no answer to give", and what follows is the line the
+    // moment would have shown anyway. That fallback is deliberate rather than a
+    // second-best: with one conclusion there is nothing to assemble, and with
+    // one nobody could put into words, showing the thing itself beats both
+    // dressing a single conclusion up as an answer and falling silent at
+    // someone who just asked a direct question.
+    if (dropId === undefined) {
+      const answered = await answerFor(candidates, at);
+      if (answered !== null) return answered;
+    }
+
+    // The dice, and the whole of the mystery: whether this turn is used at all,
+    // which of the things that could be said is said, and which of that band's
+    // openings the line carries. A question is never rolled for — the user
+    // asked, and "not this time" is not an answer to a question — so the chance
+    // applies to a drop.
+    if (dropId !== undefined && random() >= surfacingPolicy.surfaceChance) {
+      return { kind: 'none', reason: 'held-back' };
+    }
+    // A roll below 1 always names one of them; the fallback keeps a caller that
+    // breaks that contract from turning "show one" into "show none".
+    const chosen = candidates[Math.floor(random() * candidates.length)] ?? candidates[0];
+
+    // Written down before it is handed back, so the cooldown is a fact about
+    // the user from the moment they have read the line.
+    await store.recordSurfacing(chosen.conclusion.id, at);
+
+    const terms = new Map((await store.listTerms()).map((term) => [term.id, term]));
+    return {
+      kind: 'surfaced',
+      // The sentence the provider wrote, in the band's own opening. The
+      // conclusion is not rewritten: its framed line stays in the portrait, and
+      // what changes per surfacing is the layer code owns — how firmly the
+      // product speaks, never what it observed.
+      text: surfacingLine(chosen.tier, chosen.claim, random()),
+      tier: chosen.tier,
+      conclusion: { id: chosen.conclusion.id, text: chosen.conclusion.text },
+      support: chosen.conclusion.supportTermIds
+        .map((termId) => terms.get(termId))
+        .filter((term): term is StoredTerm => term !== undefined)
+        .map(toNamedTerm),
+      mentions: chosen.conclusion.mentions,
+      spanDays: chosen.conclusion.spanDays,
+      averageStrength: chosen.conclusion.averageStrength,
+      surfacedAt: at,
+    };
+  }
+
+  /**
+   * Ask the port whether these words are a question, and about what.
+   *
+   * Null is "nobody could say", and every caller must read it as **not a
+   * question**. That is the ticket's own rule (`判不出是问题，就不当问题`) rather
+   * than a convenience: a judgement nobody could make is not a judgement, and
+   * answering a thought spoken aloud as though it were a question puts a
+   * judgement where a fact was asked for. Having no provider at all is the same
+   * answer, for the same reason — there is nobody to ask, so nothing is claimed.
+   */
+  async function readAsking(
+    body: string,
+    shape: QuestionShape,
+  ): Promise<JudgeQuestionResult | null> {
+    const asking = provider;
+    if (asking === undefined) return null;
+    try {
+      return await asking.judgeQuestion({ body, shape });
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Route one drop: a fragment, a question about the **records**, or one about
+   * the **user**.
+   *
+   * Two readings, in the order they are cheap:
+   *
+   *  - **The shape**, by ordinary code (`readQuestionShape`). A statement is a
+   *    fragment and nobody is asked, which is what keeps most drops free of any
+   *    judgement at all.
+   *  - **The model**, for anything that could be a question. What it decides is
+   *    whether the words are actually being put to the product — 「下周三交提纲吗」
+   *    said to oneself is not — and, when they are, whether they are about what
+   *    the user wrote down or about the user.
+   *
+   * The drop's **输入类型** is read in exactly one place, and only where the
+   * shape is genuinely undecided: a feeling worded as a question is still a
+   * feeling, and putting 「我最近是不是很丧呢」 to the records would be the product
+   * mistaking self-talk for a question. An explicit question mark or asking
+   * phrase is judged by the model whatever the reader called the drop, because
+   * swallowing a real question is the one mistake with no honest fallback.
+   *
+   * A null `inputType` — a drop nobody has read, which is what a failed reading
+   * leaves behind — cannot suppress anything, so the words are judged like any
+   * other `unclear` shape. That is deliberate: a reading that never happened is
+   * not a reading of "not a question", and letting it turn a question into a
+   * fragment would make the same sentence route two ways depending on whether a
+   * provider answered.
+   *
+   * @param body - the text as typed.
+   * @param inputType - what the drop was read as, or null when it has not been read.
+   * @returns the arm this delivery is.
+   */
+  async function routeDelivery(body: string, inputType: InputType | null): Promise<DeliveryRoute> {
+    const shape = readQuestionShape(body);
+    if (shape === 'statement') return 'fragment';
+    if (shape === 'unclear' && inputType === 'emotion') return 'fragment';
+
+    const asking = await readAsking(body, shape);
+    if (asking === null || !asking.asks) return 'fragment';
+    return asking.about;
+  }
+
+  /**
+   * What the product says after one drop, decided here rather than by a page.
+   *
+   * The three arms, and what each is for:
+   *
+   *  - **A question about the records** is answered by `recall` and by nothing
+   *    else. What comes back is a fact — the user's own words, cited — and the
+   *    visible moment is deliberately not consulted, not even when the records
+   *    turn out not to cover the question: 「答不出就明确说没找到」 is what the
+   *    product owes someone asking about a fact, and a judgement pushed at them
+   *    instead is the one answer this ticket names as forbidden.
+   *  - **A question about the user** goes to the visible moment, and to nothing
+   *    else. The records are deliberately **not** consulted first, and that is a
+   *    correction the real chain forced (ticket 15's Comments carry the run):
+   *    asked 「你觉得我最近怎么样」, the reader said `self`, the question was then
+   *    put to the records out of cheapness, and they matched — so the user was
+   *    handed their own newest fragment back as the answer to a question about
+   *    what the product makes of them. What comes back is the assembled
+   *    **answer** when several conclusions can be brought together, and ticket
+   *    11's fallback of the one real line otherwise, so someone who asked a
+   *    direct question is never met with silence.
+   *  - **A fragment** gets its own reply and, when it carries a feeling, the one
+   *    line the moment surfaces. Nothing to say comes back as `none` rather than
+   *    as a reason: surfacing does not push, and a page that explained "not this
+   *    time" after every fragment would be explaining the product's internals.
+   *
+   * @param drop - the drop as it now stands, reading included.
+   * @returns what the product had to say besides catching it.
+   */
+  async function speakAfter(drop: StoredDrop): Promise<DeliverySpeech> {
+    const route = await routeDelivery(drop.body, drop.inputType);
+
+    if (route === 'records') {
+      return { kind: 'recall', result: await recallFrom(drop.body, { withoutDropId: drop.id }) };
+    }
+
+    if (route === 'self') {
+      // The moment. A `none` result is reported rather than collapsed, because
+      // the user asked: what the page words it as is "not this time", which is a
+      // different fact from the silence a fragment gets.
+      return { kind: 'surface', result: await surfaceFrom() };
+    }
+
+    const surfaced = await surfaceFrom({ dropId: drop.id });
+    return surfaced.kind === 'none' ? { kind: 'none' } : { kind: 'surface', result: surfaced };
   }
 
   return {
     async drop(body: string): Promise<DropResult> {
       return recordDrop(body, null);
+    },
+
+    async deliver(body: string): Promise<Delivery> {
+      // The words first, through the same path every other drop takes: nothing
+      // about the fused page may make the user's material wait on a model to be
+      // safe.
+      const recorded = await recordStored(body, null);
+
+      // The reading, **waited for** — unlike `drop`, which deliberately does not
+      // wait. Both halves of this operation need it: the routing reads the input
+      // type the reader judged, and what the page shows beside the line is the
+      // items and terms the reading produced. `ensureRead` means this joins the
+      // reading already running rather than paying for it twice.
+      await ensureRead(recorded);
+      const read = (await store.findDrop(recorded.id)) ?? recorded;
+
+      return {
+        drop: toSummary(
+          read,
+          await store.listItemsForDrop(recorded.id),
+          await store.listTermsForDrop(recorded.id),
+        ),
+        // Spoken after the reading has landed, because the reading is part of
+        // what is being routed on.
+        speech: await speakAfter(read),
+      };
     },
 
     async listDrops(): Promise<readonly DropSummary[]> {
@@ -2107,83 +2502,7 @@ export function createDomain(options: DomainCoreOptions): Domain {
     },
 
     async requestSurfacing(options?: SurfacingOptions): Promise<SurfacingResult> {
-      // The trigger, read before anything else runs. A drop the product does not
-      // speak after is not a moment, and no look is forced on its account — see
-      // `isAMoment` for what makes one.
-      const dropId = options?.dropId;
-      if (dropId !== undefined) {
-        const drop = await store.findDrop(dropId);
-        // A drop nobody recorded is not a moment either: nothing arrived to
-        // speak after.
-        if (drop === null || !isAMoment(drop)) {
-          return { kind: 'none', reason: 'not-a-moment' };
-        }
-      }
-
-      // Judged now rather than whenever the invisible look would have come round:
-      // the moment is the user's, and what they are about to read has to count
-      // the last few fragments. It goes through the one look queue, so two
-      // attempts in the same breath cannot each spend the alternation's turn.
-      await queueLook(settle);
-
-      const at = now();
-      const ready = await readySurfacings(at);
-      if (ready.kind === 'none') return ready;
-      const candidates = ready.candidates;
-
-      // The asked-for **answer**: several conclusions brought together into one
-      // sentence rather than one of them shown. Only a question is answered this
-      // way — a drop gets the one line that belongs to the moment it just made —
-      // and it is the same moment otherwise, which is what keeps the cooldown and
-      // the one-line-per-turn cap true of both: they cannot each produce
-      // something in a turn they share.
-      //
-      // Null means "there is no answer to give", and what follows is the line the
-      // moment would have shown anyway. That fallback is deliberate rather than a
-      // second-best: with one conclusion there is nothing to assemble, and with
-      // one nobody could put into words, showing the thing itself beats both
-      // dressing a single conclusion up as an answer and falling silent at
-      // someone who just asked a direct question.
-      if (dropId === undefined) {
-        const answered = await answerFor(candidates, at);
-        if (answered !== null) return answered;
-      }
-
-      // The dice, and the whole of the mystery: whether this turn is used at all,
-      // which of the things that could be said is said, and which of that band's
-      // openings the line carries. A question is never rolled for — the user
-      // asked, and "not this time" is not an answer to a question — so the chance
-      // applies to a drop.
-      if (dropId !== undefined && random() >= surfacingPolicy.surfaceChance) {
-        return { kind: 'none', reason: 'held-back' };
-      }
-      // A roll below 1 always names one of them; the fallback keeps a caller that
-      // breaks that contract from turning "show one" into "show none".
-      const chosen = candidates[Math.floor(random() * candidates.length)] ?? candidates[0];
-
-      // Written down before it is handed back, so the cooldown is a fact about
-      // the user from the moment they have read the line.
-      await store.recordSurfacing(chosen.conclusion.id, at);
-
-      const terms = new Map((await store.listTerms()).map((term) => [term.id, term]));
-      return {
-        kind: 'surfaced',
-        // The sentence the provider wrote, in the band's own opening. The
-        // conclusion is not rewritten: its framed line stays in the portrait, and
-        // what changes per surfacing is the layer code owns — how firmly the
-        // product speaks, never what it observed.
-        text: surfacingLine(chosen.tier, chosen.claim, random()),
-        tier: chosen.tier,
-        conclusion: { id: chosen.conclusion.id, text: chosen.conclusion.text },
-        support: chosen.conclusion.supportTermIds
-          .map((termId) => terms.get(termId))
-          .filter((term): term is StoredTerm => term !== undefined)
-          .map(toNamedTerm),
-        mentions: chosen.conclusion.mentions,
-        spanDays: chosen.conclusion.spanDays,
-        averageStrength: chosen.conclusion.averageStrength,
-        surfacedAt: at,
-      };
+      return surfaceFrom(options);
     },
 
     async extract(dropId: string): Promise<DropSummary | null> {
@@ -2194,67 +2513,15 @@ export function createDomain(options: DomainCoreOptions): Domain {
       // it soon will be. It still never rejects — a provider that is down comes
       // back as `extracted: false`, so a caller retrying later has nothing to
       // catch.
-      await extractInto(drop);
+      //
+      // Through `ensureRead`, so a retry that arrives while the reading is still
+      // running joins it instead of driving the provider a second time.
+      await ensureRead(drop);
       return readDrop(dropId);
     },
 
     async recall(question: string, options?: RecallOptions): Promise<RecallResult> {
-      // No provider means the question cannot be put to the records at all. That
-      // is `unavailable`, not `not-found`: nothing was searched, so claiming the
-      // records do not cover the question would be a claim about the user's own
-      // data that nobody checked.
-      if (provider === undefined) return { kind: 'unavailable' };
-
-      // What to look for. The model reads the question; it does not read the
-      // records, and it never decides whether an answer exists.
-      let matchText: readonly string[];
-      try {
-        matchText = (await provider.parseQuestion({ question })).matchText;
-      } catch {
-        // A provider that is down, refuses, or blows up must not become an
-        // invented answer, and must not be reported as a fact about the data.
-        return { kind: 'unavailable' };
-      }
-
-      // Blank entries are discarded before matching. A model that returned `['']`
-      // or whitespace would otherwise match every drop, since every string
-      // contains the empty string — turning "I have nothing to look for" into
-      // "everything answers this question", which is exactly backwards.
-      const wanted = matchText.map((text) => text.trim()).filter((text) => text.length > 0);
-      if (wanted.length === 0) return { kind: 'not-found' };
-
-      // Selection is plain code, not a model call: a drop matches when any of
-      // the text appears in it. That is what makes "found nothing" a fact about
-      // the data rather than an opinion, and the same question recalls the same
-      // records every time. `listDrops` is oldest-first, so this order is stable.
-      const sources: readonly RecallSource[] = (await store.listDrops())
-        .filter((drop) => wanted.some((text) => drop.body.includes(text)))
-        .map(toRecallSource);
-      if (sources.length === 0) return { kind: 'not-found' };
-
-      // The moment to answer *as of*. Pinned by the caller for the demo's
-      // "a few days later" viewpoint, otherwise now. It reaches the composer
-      // only, so it can change how the answer reads but never what was found.
-      const now = options?.now ?? new Date().toISOString();
-
-      let answer: string;
-      try {
-        answer = (await provider.composeRecallAnswer({ question, records: sources, now })).answer;
-      } catch {
-        return { kind: 'unavailable' };
-      }
-
-      // An answer of nothing is not an answer. Without this, a provider
-      // returning whitespace would produce `kind: 'answered'` with an empty line
-      // beside a source — the exact confusion this result shape exists to rule
-      // out — so it is refused here rather than rendered.
-      if (answer.trim().length === 0) return { kind: 'unavailable' };
-
-      // Every match is cited, not one chosen "main" source: the composer was
-      // handed all of them and may have drawn on any, so naming a single drop
-      // could show the user an original the answer did not come from. Checking
-      // the answer against the original is the reason a source is shown at all.
-      return { kind: 'answered', answer, sources };
+      return recallFrom(question, options);
     },
 
     async previewDeletion(dropId: string): Promise<DeletionPreview | null> {

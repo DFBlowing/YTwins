@@ -493,8 +493,16 @@ export interface RecallOptions {
  * kept apart because they are different facts about the product: a drop that was
  * not a moment at all, material that has not settled into anything sayable,
  * something sayable that the user has already heard this week, and a turn the
- * product chose not to use. The page shows nothing for any of them — surfacing
- * does not push — so these are for the domain and its checks, not for the user.
+ * product chose not to use. A **drop** shows nothing for any of them — surfacing
+ * does not push — so on that path they are for the domain and its checks rather
+ * than for the user.
+ *
+ * > **2026-09-19 (ticket 15).** One path does show them: a question the user
+ * > asked. Silence is not an answer to a question, so a fused-page delivery whose
+ * > moment had nothing to say reports the reason and the page words it — "not
+ * > this time" is an outcome the user is owed when they asked, and the same
+ * > reason on a drop stays invisible. The distinction is the trigger, not the
+ * > reason.
  */
 export type SurfacingMiss =
   /**
@@ -786,6 +794,83 @@ export interface Upcoming {
 }
 
 /**
+ * What the product had to say besides catching the drop.
+ *
+ * Ticket 15 fused the product's three doings into one box, and this is the half
+ * of a delivery that is *not* the drop itself: the two things the product may
+ * decide to answer with, and the ordinary case where it decides to answer with
+ * nothing at all.
+ *
+ * A discriminated union rather than two optional fields, because the three are
+ * mutually exclusive and a caller has to have decided which it got. Note what
+ * `recall` is **not**: it says the question was put to the records, not that the
+ * records covered it — `result` carries `not-found` and `unavailable`, and both
+ * are honest outcomes the page has to be able to show.
+ *
+ * The two arms are named from `CONTEXT.md`'s own words — 追溯 and 浮现 — because
+ * they are the product's, not the page's: nothing here is a call the page made,
+ * and no name here may become one.
+ */
+export type DeliverySpeech =
+  | {
+      /** The user's words were a question about their **records**, and this is what came of it. */
+      readonly kind: 'recall';
+      readonly result: RecallResult;
+    }
+  | {
+      /** The visible moment was raised, and this is what came of it. */
+      readonly kind: 'surface';
+      readonly result: SurfacingResult;
+    }
+  | {
+      /**
+       * There was nothing to say beyond the drop's own reply.
+       *
+       * The ordinary case for a fragment: most of what anyone types is a thing
+       * to be kept, not something the product has anything to add to.
+       */
+      readonly kind: 'none';
+    };
+
+/**
+ * One thing the user typed into the one box, and everything the product said
+ * back about it.
+ *
+ * This is the **task-shaped** result of the fused page (`CONTEXT.md`, 投递 /
+ * 追溯 / 浮现): the user handed over their words, and what comes back is the
+ * drop as it now stands — the original, its reply, its items and its terms —
+ * plus whatever the domain decided to say after it. Nothing here is a decision
+ * the page made, and the page needs no second call to find any of it out: which
+ * of the three this turned out to be is the domain's rule, and it was made once,
+ * from the words as they arrived.
+ *
+ * The original is stored and answered **before** any of the rest is decided, so
+ * the drop's promise is untouched by this shape: a provider that is slow, down,
+ * or still thinking costs the delivery nothing but the time the user waits.
+ *
+ * **On the name.** `CONTEXT.md` calls this unit an **互动** — "one drop the user
+ * makes, plus the AI's optional response" — while **投递** is already the narrower
+ * `drop` above, and the two arms below carry the glossary's own 追溯 and 浮现.
+ * The English says `Delivery` rather than `Interaction` because in a web
+ * codebase the latter reads as a DOM input event. If `/domain-modeling` would
+ * rather the interface used the glossary's word, this is a mechanical rename
+ * (`Delivery*` → `Interaction*`, `deliver` → `interact`) and nothing else.
+ */
+export interface Delivery {
+  /**
+   * The drop as it stands: the faithful original, the line it is answered with,
+   * the items it was read into and the terms it said.
+   *
+   * The same shape `listDrops` and `getDrop` hand back, and deliberately so: a
+   * delivery is a drop, and a second spelling of "what a drop is" would drift
+   * from the one the page already reads after a refresh.
+   */
+  readonly drop: DropSummary;
+  /** What the product decided to say after it, or `none` when there was nothing. */
+  readonly speech: DeliverySpeech;
+}
+
+/**
  * The domain core.
  *
  * Ticket 01 opened exactly one operation: **dropping**. Ticket 02 opened what
@@ -829,6 +914,16 @@ export interface Upcoming {
  * the words behind them travelling with it — and a fallback that is a promise in
  * its own right: with too little to assemble, the one line there is is shown as
  * itself, so the answer is never a restatement dressed up and never a silence.
+ *
+ * Ticket 15 opens **one box** instead of three. Dropping, asking and surfacing
+ * are not three things the user chooses between — telling a fragment from a
+ * question is the product's job (`routing.ts`), and asking the user to pick a
+ * tab is asking them to do it — so `deliver` takes the words and answers with
+ * everything that follows from them: the drop, and whichever of 追溯 and 浮现
+ * the domain decided this delivery was. Nothing about the three changes: the
+ * same `drop`, the same `recall`, the same one surfacing moment with its
+ * cooldown and its one-line-per-turn cap. What is new is only that the decision
+ * between them is made here rather than by a page's `if`.
  */
 export interface Domain {
   /**
@@ -846,6 +941,56 @@ export interface Domain {
    * @returns what this drop caught, and the reply to show the user.
    */
   drop(body: string): Promise<DropResult>;
+
+  /**
+   * Hand the product one piece of text, and get everything that follows from it.
+   *
+   * The one operation the fused page uses, and the reason it exists is that the
+   * routing is a **product rule** rather than a page's `if`: whether the words
+   * are a fragment, a question about the user's records, or a question about the
+   * user is decided here, once, and the page only shows what came back. A page
+   * that stitched `drop` + `recall` + `requestSurfacing` together would be
+   * making that decision itself, in the one place the product cannot explain it.
+   *
+   * What happens, in order:
+   *
+   *  1. The words are **stored and answered first** — the same path and the same
+   *     promise `drop` makes, so nothing about this operation can make a
+   *     fragment wait on a model to be safe.
+   *  2. The drop is **read**, and this call waits for it (unlike `drop`), because
+   *     the routing reads the **输入类型** the reader judged and because the
+   *     delivery carries the items and terms the reading produced.
+   *  3. The routing is made (`routing.ts` + the port's `judgeQuestion`): a
+   *     statement is a fragment without anyone being asked; anything that could
+   *     be a question is put to the model, and a judgement nobody could make
+   *     leaves it a fragment.
+   *  4. What follows depends on the arm:
+   *     - **a question about the records** is answered by `recall`, plainly and
+   *       with its source, and **no judgement is pushed at it** — not even when
+   *       the records turn out not to cover it, which is reported as the plain
+   *       "found nothing" it is;
+   *     - **a question about the user** is answered by the visible moment and by
+   *       nothing else — the assembled **answer** when several conclusions can be
+   *       brought together, and ticket 11's fallback of the one line otherwise.
+   *       The records are deliberately not consulted first: a question about what
+   *       the product makes of someone is not a question about what they wrote
+   *       down, and the real chain showed that reading their newest fragment back
+   *       to them is what "putting it to the records first" amounts to;
+   *     - **a fragment** gets nothing but its own reply — and, when it carries a
+   *       feeling, the one line the moment surfaces (ticket 06's moments, one per
+   *       turn, seven-day cooldown, all unchanged). A fragment with nothing to
+   *       say after it comes back as `none` rather than as a reason: surfacing
+   *       does not push, and the page has nothing to explain.
+   *
+   * A question is never answered out of a drop that **is** the question: the
+   * words just typed are not part of the user's material, and citing them as the
+   * source of their own answer would be the product reading their question back
+   * to them as though it were something they had told it.
+   *
+   * @param body - the raw text the user typed. Stored verbatim.
+   * @returns the drop as it now stands, and what the product decided to say.
+   */
+  deliver(body: string): Promise<Delivery>;
 
   /**
    * The drops recorded so far, oldest first, each carrying what it caught.

@@ -35,13 +35,23 @@ const MIXED_TERMS = ['期末怎么算分', '下周三交提纲', '好烦'];
  * Vectors that put each pair in the band the check wants.
  *
  * Only the last pair is close enough to matter: 想学吉他 and 想学门乐器 sit at a
- * cosine of 0.8, which is inside the grey zone, so that link can only come from
- * the judge. Everything the mixed fragment said is orthogonal or opposite to
- * them, so those pairs must stay unlinked.
+ * cosine of 0.855, which is inside the **calibrated** grey zone (ticket 14 put the
+ * bands at 0.85/0.87), so that link can only come from the judge. Everything the
+ * mixed fragment said is orthogonal or opposite to them, so those pairs must stay
+ * unlinked.
+ *
+ * The 0.8 this pair used to sit at is below the unrelated gate now, so nothing
+ * would be judged and the check would fail for a reason that has nothing to do
+ * with linking — the same fixture move ticket 14 made in `domain.test.ts`, for
+ * the same reason. Repaired in ticket 15, which found the script red.
  */
+function atCosine(score) {
+  return [score, Math.sqrt(1 - score ** 2)];
+}
+
 const VECTORS = {
   想学吉他: [1, 0],
-  想学门乐器: [0.8, 0.6],
+  想学门乐器: atCosine(0.855),
   期末怎么算分: [0, 1],
   下周三交提纲: [0, 1],
   好烦: [-1, 0],
@@ -191,7 +201,7 @@ try {
     assert.ok(link !== undefined, 'the grey pair was judged and connected');
     assert.equal(link.kind, 'similar', 'as the semantic kind');
     assert.match(link.reason, /灰区/, 'and the reason says it was judged rather than scored');
-    assert.ok(link.strength > 0.7 && link.strength < 0.85, 'its strength is the score it got');
+    assert.ok(link.strength > 0.85 && link.strength < 0.87, 'its strength is the score it got');
 
     assert.equal(
       linkBetween(links, '想学吉他', '期末怎么算分'),
