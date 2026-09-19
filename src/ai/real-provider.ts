@@ -58,10 +58,22 @@ interface Built<T> {
   readonly problem: string | null;
 }
 
-/** What to say when the cloud LLM has no key. */
-const NO_LLM_KEY =
-  '没有配置 YTwins_LLM_API_KEY，云端 LLM 用不了：投递仍然会被记下来，' +
-  '但不会被解析，追问会说「问不到」。把 key 填进仓库根目录的 .env 再重启服务即可。';
+/** The vendor this machine is talking to, in one phrase, for the log and for a refusal. */
+function vendorPhrase(config: ProviderConfig): string {
+  const { llm } = config;
+  if (llm.preset === null) {
+    return llm.kind === 'cloud' ? '云端 LLM' : '本地 LLM（Ollama 一类）';
+  }
+  return `预设 ${llm.preset}（${llm.kind === 'cloud' ? '云端' : '本地'}）`;
+}
+
+/** What to say when the cloud LLM has no key, naming the vendor that is waiting. */
+function noLlmKey(config: ProviderConfig): string {
+  return (
+    `没有配置 YTwins_LLM_API_KEY，${vendorPhrase(config)} 上的 ${config.llm.model} 用不了：` +
+    '投递仍然会被记下来，但不会被解析，追问会说「问不到」。把 key 填进仓库根目录的 .env 再重启服务即可。'
+  );
+}
 
 /** What to say when a cloud embedding has no endpoint to call. */
 const NO_EMBEDDING_ENDPOINT =
@@ -104,14 +116,17 @@ function unavailable<T extends object>(operations: Record<string, true>, reason:
 /** Build the language-model half, saying why when it cannot be built. */
 function buildLlm(config: ProviderConfig, options: RealProviderOptions): Built<LlmOperations> {
   if (config.llm.kind === 'cloud' && config.llm.apiKey === null) {
-    return { value: unavailable<LlmOperations>(LLM_OPERATIONS, NO_LLM_KEY), problem: NO_LLM_KEY };
+    const reason = noLlmKey(config);
+    return { value: unavailable<LlmOperations>(LLM_OPERATIONS, reason), problem: reason };
   }
   return {
     value: createLlmOperations({
       client: createChatClient({
         baseUrl: config.llm.baseUrl,
         model: config.llm.model,
-        apiKey: config.llm.apiKey,
+        // The configuration built these from the preset: which header carries
+        // the key is a vendor's business, and the client has none.
+        headers: config.llm.headers,
         timeoutMs: config.llm.timeoutMs,
         fetch: options.fetch,
       }),
@@ -155,19 +170,50 @@ function buildEmbedder(config: ProviderConfig, options: RealProviderOptions): Bu
   };
 }
 
-/** One line saying which language model is in use. */
+/**
+ * One line saying which language model is in use.
+ *
+ * Which vendor, which endpoint and which model are named, plus whether a key is
+ * configured, how many extra headers were configured and which explicit
+ * variables overrode the preset. Never a key and never a header's value: a
+ * session token is a credential too, so a count is all the log gets.
+ */
 function llmNote(config: ProviderConfig): string {
-  const where = config.llm.kind === 'cloud' ? '云端 LLM' : '本地 LLM（Ollama 一类）';
-  const key = config.llm.apiKey === null ? '无 key' : 'key 已配置';
-  return `${where}：${config.llm.baseUrl} · ${config.llm.model}（${key}）`;
+  const { llm } = config;
+  const key = llm.apiKey === null ? (llm.kind === 'cloud' ? '缺 key' : '无需 key') : 'key 已配置';
+  const extra = llm.extraHeaderCount === 0 ? '' : `；另带 ${llm.extraHeaderCount} 个额外请求头`;
+  // The override is an escape hatch, not a silent drift: a machine whose base
+  // URL is not the preset's says so in the one place a person looks.
+  const overridden =
+    llm.overrides.length === 0 ? '' : `；显式覆盖：${llm.overrides.join('、')}`;
+  return `${vendorPhrase(config)}：${llm.baseUrl} · ${llm.model}（${key}${extra}${overridden}）`;
 }
 
-/** One line saying which embedding is in use. */
+/**
+ * The one thing an embedding swap costs, said every time this half is reported.
+ *
+ * The LLM half is a preset because a vendor is three values; the embedding half
+ * is not, because the link thresholds are calibrated against one specific
+ * vector space — Ticket 14 measured a genuinely related pair falling from 0.875
+ * to 0.456 under another model. Making that a one-line key swap would hand the
+ * user a set of thresholds nobody calibrated.
+ */
+const EMBEDDING_NOT_A_PRESET =
+  'embedding 不在「选一家 + 填一个 key」的承诺里：链接阈值是对着当前这一个量出来的，' +
+  '换它等于换一套标定（要重跑 ticket 14 那套实测）。';
+
+/** One line saying which embedding is in use, and what a swap would cost. */
 function embeddingNote(config: ProviderConfig): string {
   if (config.embedding.kind === 'cloud') {
-    return `云端 embedding：${config.embedding.baseUrl} · ${config.embedding.model}`;
+    return (
+      `云端 embedding：${config.embedding.baseUrl} · ${config.embedding.model}。` +
+      EMBEDDING_NOT_A_PRESET
+    );
   }
-  return `本地 embedding：${config.embedding.model}（缓存在 ${config.embedding.cacheDir}，第一次使用会联网下载）`;
+  return (
+    `本地 embedding：${config.embedding.model}（缓存在 ${config.embedding.cacheDir}，第一次使用会联网下载）。` +
+    EMBEDDING_NOT_A_PRESET
+  );
 }
 
 /**

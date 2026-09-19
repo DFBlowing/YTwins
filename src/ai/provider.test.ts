@@ -33,6 +33,9 @@ import {
   DEFAULT_CLOUD_LLM_MODEL,
   DEFAULT_LOCAL_EMBEDDING_MODEL,
   DEFAULT_LOCAL_LLM_BASE_URL,
+  DEFAULT_LOCAL_LLM_MODEL,
+  LLM_PRESET_NAMES,
+  ProviderConfigError,
   resolveProviderConfig,
   type ProviderConfig,
 } from './config.ts';
@@ -195,6 +198,251 @@ await check('the model host is configurable, so a mirror can stand in', () => {
   assert.ok(resolve({}).embedding.remoteHost.startsWith('https://'), 'and defaults to something');
 });
 
+console.log('\nprovider presets — one key, one vendor, and the way back');
+
+await check('changing vendor is changing one value: a preset plus a key', () => {
+  const deepseek = resolve({ YTwins_LLM_PRESET: 'deepseek', YTwins_LLM_API_KEY: 'sk-d' });
+  assert.equal(deepseek.llm.preset, 'deepseek');
+  assert.equal(deepseek.llm.kind, 'cloud');
+  assert.equal(deepseek.llm.baseUrl, 'https://api.deepseek.com');
+  assert.equal(deepseek.llm.model, 'deepseek-flash');
+  assert.deepEqual(deepseek.llm.headers, { authorization: 'Bearer sk-d' });
+  assert.deepEqual(deepseek.llm.overrides, [], 'nothing was overridden: this is the whole configuration');
+
+  const gemini = resolve({ YTwins_LLM_PRESET: 'gemini', YTwins_LLM_API_KEY: 'k' });
+  assert.equal(gemini.llm.baseUrl, 'https://generativelanguage.googleapis.com/v1beta/openai');
+  assert.equal(gemini.llm.model, 'gemini-3.8-flash');
+  assert.equal(gemini.llm.headers['authorization'], 'Bearer k');
+
+  const opencode = resolve({ YTwins_LLM_PRESET: 'opencode', YTwins_LLM_API_KEY: 'k' });
+  assert.equal(opencode.llm.baseUrl, 'https://opencode.ai/zen/v1');
+  assert.equal(
+    opencode.llm.model,
+    'deepseek-v4-flash',
+    'the /chat/completions tier, which is the one shape this product speaks',
+  );
+  assert.equal(opencode.llm.headers['authorization'], 'Bearer k');
+});
+
+await check('a preset that runs on this machine needs no key, and sends no header without one', () => {
+  const ollama = resolve({ YTwins_LLM_PRESET: 'ollama' });
+  assert.equal(ollama.llm.kind, 'local');
+  assert.equal(ollama.llm.baseUrl, DEFAULT_LOCAL_LLM_BASE_URL);
+  assert.equal(ollama.llm.model, DEFAULT_LOCAL_LLM_MODEL);
+  assert.equal(ollama.llm.apiKey, null);
+  assert.deepEqual(ollama.llm.headers, {}, 'a local endpoint wants no key, so it gets no header');
+
+  // A key that *is* there is still used, exactly as it is on the no-preset local
+  // path: the preset says where a key goes, not that one is forbidden.
+  const withKey = resolve({ YTwins_LLM_PRESET: 'ollama', YTwins_LLM_API_KEY: 'sk-quiet' });
+  assert.deepEqual(withKey.llm.headers, { authorization: 'Bearer sk-quiet' });
+
+  const { notes } = createRealProvider({ config: ollama });
+  assert.ok(
+    notes.some((note) => note.includes('无需 key')),
+    'the log says a local preset is not waiting for a key',
+  );
+});
+
+await check('a name nobody knows is refused, naming the variable and every choice there is', () => {
+  assert.throws(
+    () => resolve({ YTwins_LLM_PRESET: 'claude' }),
+    (error: unknown) =>
+      error instanceof ProviderConfigError &&
+      error.message.includes('YTwins_LLM_PRESET') &&
+      error.message.includes('claude') &&
+      LLM_PRESET_NAMES.every((name) => error.message.includes(name)),
+    'a vendor this product does not know must not quietly become another one',
+  );
+  assert.equal(
+    resolve({ YTwins_LLM_PRESET: ' DeepSeek ' }).llm.preset,
+    'deepseek',
+    'case and stray spaces are not a difference',
+  );
+});
+
+await check('the custom preset insists on the two things only the environment can know', () => {
+  assert.throws(
+    () => resolve({ YTwins_LLM_PRESET: 'custom' }),
+    (error: unknown) =>
+      error instanceof Error && error.message.includes('YTwins_LLM_BASE_URL'),
+    'a preset that knows nothing must not guess an endpoint',
+  );
+  assert.throws(
+    () => resolve({ YTwins_LLM_PRESET: 'custom', YTwins_LLM_BASE_URL: 'http://127.0.0.1:1234/v1' }),
+    (error: unknown) => error instanceof Error && error.message.includes('YTwins_LLM_MODEL'),
+  );
+
+  const custom = resolve({
+    YTwins_LLM_PRESET: 'custom',
+    YTwins_LLM_BASE_URL: 'http://127.0.0.1:1234/v1',
+    YTwins_LLM_MODEL: 'local-model',
+    YTwins_LLM_API_KEY: 'sk-lan',
+  });
+  assert.equal(custom.llm.baseUrl, 'http://127.0.0.1:1234/v1');
+  assert.equal(custom.llm.model, 'local-model');
+  assert.deepEqual(custom.llm.headers, { authorization: 'Bearer sk-lan' });
+  assert.deepEqual(custom.llm.overrides, [], 'what the preset asks for is not an override of it');
+});
+
+await check('an explicit variable still wins over the preset, and the log says which did', () => {
+  const config = resolve({
+    YTwins_LLM_PRESET: 'deepseek',
+    YTwins_LLM_BASE_URL: 'https://api.example.com/v1',
+    YTwins_LLM_API_KEY: 'sk-d',
+  });
+  assert.equal(config.llm.baseUrl, 'https://api.example.com/v1', 'the escape hatch still exists');
+  assert.equal(config.llm.model, 'deepseek-flash', 'and what nobody overrode still comes from the preset');
+  assert.deepEqual(config.llm.overrides, ['YTwins_LLM_BASE_URL']);
+
+  const { notes } = createRealProvider({ config });
+  const said = notes.join('\n');
+  assert.ok(said.includes('deepseek'), 'the log still says which vendor was chosen');
+  assert.ok(
+    said.includes('YTwins_LLM_BASE_URL'),
+    'an override nobody can see is a configuration drift',
+  );
+
+  const both = resolve({
+    YTwins_LLM_PRESET: 'custom',
+    YTwins_LLM_BASE_URL: 'http://127.0.0.1:1234/v1',
+    YTwins_LLM_MODEL: 'local-model',
+    YTwins_LLM: 'local',
+  });
+  assert.equal(both.llm.kind, 'local', 'a custom endpoint may be this machine’s own');
+  assert.deepEqual(both.llm.overrides, [], 'and saying so is the preset’s input, not an override');
+});
+
+await check('a preset that knows where its model runs refuses to be told otherwise', () => {
+  assert.throws(
+    () => resolve({ YTwins_LLM_PRESET: 'gemini', YTwins_LLM: 'local' }),
+    (error: unknown) =>
+      error instanceof ProviderConfigError &&
+      error.message.includes('YTwins_LLM') &&
+      error.message.includes('gemini'),
+    'calling a cloud endpoint "local" is the one mistake this configuration may not make',
+  );
+  assert.throws(
+    () => resolve({ YTwins_LLM_PRESET: 'ollama', YTwins_LLM: 'cloud' }),
+    (error: unknown) =>
+      error instanceof Error && error.message.includes('YTwins_LLM'),
+    'nor the other way round, which would invent a key requirement for a local model',
+  );
+
+  const agreeing = resolve({ YTwins_LLM_PRESET: 'ollama', YTwins_LLM: 'local' });
+  assert.equal(agreeing.llm.kind, 'local', 'agreeing with the preset is allowed');
+});
+
+await check('with no preset at all, nothing about this machine changes', () => {
+  const config = resolve({ YTwins_LLM_API_KEY: 'sk-secret' });
+  assert.equal(config.llm.preset, null);
+  assert.deepEqual(config.llm.overrides, []);
+  assert.equal(config.llm.baseUrl, DEFAULT_CLOUD_LLM_BASE_URL);
+  assert.equal(config.llm.model, DEFAULT_CLOUD_LLM_MODEL);
+  assert.deepEqual(
+    config.llm.headers,
+    { authorization: 'Bearer sk-secret' },
+    'the key still goes where it went before presets existed',
+  );
+
+  const local = resolve({ YTwins_LLM: 'local' });
+  assert.equal(local.llm.baseUrl, DEFAULT_LOCAL_LLM_BASE_URL);
+  assert.equal(local.llm.model, 'qwen2.5:7b');
+  assert.deepEqual(local.llm.headers, {});
+});
+
+await check('the missing-key message names the preset that is waiting for one', () => {
+  const { notes } = createRealProvider({
+    config: resolve({ YTwins_LLM_PRESET: 'gemini' }),
+  });
+  const said = notes.join('\n');
+  assert.ok(said.includes('YTwins_LLM_API_KEY'), 'the variable to fill in is named');
+  assert.ok(said.includes('gemini'), 'and so is the vendor that is waiting');
+  assert.ok(said.includes('gemini-3.8-flash'), 'and the model it would have used');
+});
+
+await check('extra headers are configuration, and their values never reach the log', () => {
+  const config = resolve({
+    YTwins_LLM_PRESET: 'opencode',
+    YTwins_LLM_API_KEY: 'sk-zen',
+    YTwins_LLM_HEADERS: 'x-opencode-session=sess-1;x-extra= two ',
+  });
+  assert.deepEqual(config.llm.headers, {
+    authorization: 'Bearer sk-zen',
+    'x-opencode-session': 'sess-1',
+    'x-extra': 'two',
+  });
+
+  const { notes } = createRealProvider({ config });
+  const said = notes.join('\n');
+  assert.ok(said.includes('deepseek-v4-flash'), 'the model is still named');
+  assert.ok(said.includes('2 个额外请求头'), 'and the count of extra headers');
+  assert.ok(!said.includes('sess-1'), 'a session token is a credential: never a value, only a count');
+  assert.ok(!said.includes('sk-zen'));
+});
+
+await check('a header name that is not one is refused, and the refusal quotes no value', () => {
+  const refused = (headers: string, what: string): void => {
+    assert.throws(
+      () => resolve({ YTwins_LLM_HEADERS: headers }),
+      (error: unknown) =>
+        error instanceof ProviderConfigError && error.message.includes('YTwins_LLM_HEADERS'),
+      what,
+    );
+  };
+
+  refused('x bad=1', 'a name with a space in it');
+  refused('x-a', 'a segment with no value');
+  refused('x-a noname', 'a segment whose separator is a space');
+  refused('=1', 'no name at all');
+  refused('x-a:1=2', 'a colon in the name');
+  refused('content-type=text/plain', 'the client’s own protocol header');
+  refused('accept=text/plain', 'the other one');
+
+  // A value is a credential as often as not, and an error message goes to the
+  // log: the segment is identified by its position instead of being quoted.
+  assert.throws(
+    () => resolve({ YTwins_LLM_HEADERS: 'x-opencode-session sess-must-not-leak' }),
+    (error: unknown) =>
+      error instanceof ProviderConfigError &&
+      error.message.includes('YTwins_LLM_HEADERS') &&
+      error.message.includes('第 1 段') &&
+      !error.message.includes('sess-must-not-leak'),
+    'this product may not print a header value, not even the one it refused',
+  );
+
+  const { notes } = createRealProvider({
+    config: resolve({ YTwins_LLM_HEADERS: 'X-Extra=1' }),
+  });
+  assert.ok(notes.join('\n').includes('1 个额外请求头'), 'and a valid one is accepted and counted');
+});
+
+await check('the header the key goes in belongs to the key, and only when there is one', () => {
+  const key = { YTwins_LLM_API_KEY: 'sk-d' };
+  for (const name of ['Authorization', 'AUTHORIZATION']) {
+    assert.throws(
+      () => resolve({ YTwins_LLM_HEADERS: `${name}=x`, ...key }),
+      (error: unknown) =>
+        error instanceof ProviderConfigError && error.message.includes('YTwins_LLM_API_KEY'),
+      `${name}: two sources for one header is one silent loser, and it must not be silent`,
+    );
+  }
+  assert.throws(
+    () => resolve({ YTwins_LLM_PRESET: 'deepseek', YTwins_LLM_API_KEY: 'sk-d', YTwins_LLM_HEADERS: 'authorization=x' }),
+    (error: unknown) => error instanceof ProviderConfigError,
+    'the same rule whichever preset the key came from',
+  );
+
+  // With no key, nothing else writes that header, so it stays available: a
+  // local gateway asking for `Basic …`, or for a scheme that is not Bearer, is
+  // a real machine and this is the only way to reach it.
+  const noKey = resolve({
+    YTwins_LLM_PRESET: 'ollama',
+    YTwins_LLM_HEADERS: 'authorization=Basic dXNlcg==',
+  });
+  assert.deepEqual(noKey.llm.headers, { authorization: 'Basic dXNlcg==' });
+});
+
 console.log('\nprovider configuration — reading the environment file');
 
 await check('a .env file is read the way a person writes one', () => {
@@ -341,6 +589,11 @@ interface RecordedCall {
   readonly headers: Record<string, string>;
 }
 
+/** What a key turns into on the wire, as the configuration builds it. */
+function bearer(key: string): Record<string, string> {
+  return { authorization: `Bearer ${key}` };
+}
+
 /** A `fetch` that answers from a handler and remembers every call. */
 function recordingFetch(
   respond: (call: { url: string; init: RequestInit }) => Response | Promise<Response>,
@@ -381,7 +634,7 @@ await check('one call reaches the endpoint, asking for JSON from the configured 
   const client = createChatClient({
     baseUrl: DEFAULT_CLOUD_LLM_BASE_URL,
     model: 'deepseek-flash',
-    apiKey: 'sk-secret',
+    headers: bearer('sk-secret'),
     fetch,
   });
 
@@ -399,20 +652,37 @@ await check('one call reaches the endpoint, asking for JSON from the configured 
   ]);
 });
 
-await check('the key goes in the Authorization header, and into nothing else', async () => {
+await check('the headers it is handed are the headers it sends, and the key stays out of the rest', async () => {
   const { fetch, calls } = recordingFetch(() => completion('{}'));
   const client = createChatClient({
     baseUrl: 'https://api.deepseek.com',
     model: 'deepseek-flash',
-    apiKey: 'sk-secret',
+    headers: { ...bearer('sk-secret'), 'x-vendor': 'yes' },
     fetch,
   });
   await client.askJson(SAY_SOMETHING, 'respond');
 
   const [call] = calls;
   assert.equal(call?.headers['authorization'], 'Bearer sk-secret');
+  assert.equal(call?.headers['x-vendor'], 'yes', 'a vendor header travels verbatim');
   assert.ok(!JSON.stringify(call?.body).includes('sk-secret'), 'not in the body');
   assert.ok(!(call?.url ?? '').includes('sk-secret'), 'not in the query string either');
+});
+
+await check('the protocol’s own two headers are the client’s, whoever is handing it headers', async () => {
+  const { fetch, calls } = recordingFetch(() => completion('{}'));
+  const client = createChatClient({
+    baseUrl: 'https://api.example.com/v1',
+    model: 'm',
+    headers: { 'content-type': 'text/plain' },
+    fetch,
+  });
+  await client.askJson(SAY_SOMETHING, 'respond');
+  assert.equal(
+    calls[0]?.headers['content-type'],
+    'application/json',
+    'the body is JSON whatever anybody configured',
+  );
 });
 
 await check('a base URL with a trailing slash does not double the separator', async () => {
@@ -420,30 +690,31 @@ await check('a base URL with a trailing slash does not double the separator', as
   const client = createChatClient({
     baseUrl: 'https://api.example.com/v1/',
     model: 'm',
-    apiKey: null,
+    headers: {},
     fetch,
   });
   await client.askJson(SAY_SOMETHING, 'respond');
   assert.equal(calls[0]?.url, 'https://api.example.com/v1/chat/completions');
 });
 
-await check('a local endpoint with no key sends no Authorization header at all', async () => {
+await check('a client with no headers sends none beyond the protocol’s own', async () => {
   const { fetch, calls } = recordingFetch(() => completion('{}'));
   const client = createChatClient({
     baseUrl: 'http://127.0.0.1:11434/v1',
     model: 'qwen2.5:7b',
-    apiKey: null,
+    headers: {},
     fetch,
   });
   await client.askJson(SAY_SOMETHING, 'respond');
   assert.equal(calls[0]?.headers['authorization'], undefined);
+  assert.deepEqual(Object.keys(calls[0]?.headers ?? {}).sort(), ['accept', 'content-type']);
 });
 
 await check('a refusal is reported with the status and what the server said', async () => {
   const { fetch } = recordingFetch(
     () => new Response('{"error":{"message":"Insufficient Balance"}}', { status: 402 }),
   );
-  const client = createChatClient({ baseUrl: 'https://api.deepseek.com', model: 'm', apiKey: 'sk-secret', fetch });
+  const client = createChatClient({ baseUrl: 'https://api.deepseek.com', model: 'm', headers: bearer('sk-secret'), fetch });
   await assert.rejects(
     () => client.askJson(SAY_SOMETHING, 'extract'),
     (error: unknown) =>
@@ -459,7 +730,7 @@ await check('the key never appears in an error message', async () => {
   const client = createChatClient({
     baseUrl: 'https://api.deepseek.com',
     model: 'm',
-    apiKey: 'sk-must-not-leak',
+    headers: bearer('sk-must-not-leak'),
     fetch,
   });
   await assert.rejects(
@@ -470,7 +741,7 @@ await check('the key never appears in an error message', async () => {
 
 await check('empty content is reported as the JSON-mode quirk it is', async () => {
   const { fetch } = recordingFetch(() => completion(''));
-  const client = createChatClient({ baseUrl: 'https://api.deepseek.com', model: 'm', apiKey: null, fetch });
+  const client = createChatClient({ baseUrl: 'https://api.deepseek.com', model: 'm', headers: {}, fetch });
   await assert.rejects(
     () => client.askJson(SAY_SOMETHING, 'composeConclusion'),
     (error: unknown) => error instanceof Error && error.message.includes('composeConclusion'),
@@ -481,7 +752,7 @@ await check('an answer with no choices is reported, showing what the body was', 
   const { fetch } = recordingFetch(
     () => new Response('{"id":"x","object":"chat.completion"}', { status: 200 }),
   );
-  const client = createChatClient({ baseUrl: 'https://api.deepseek.com', model: 'm', apiKey: null, fetch });
+  const client = createChatClient({ baseUrl: 'https://api.deepseek.com', model: 'm', headers: {}, fetch });
   await assert.rejects(
     () => client.askJson(SAY_SOMETHING, 'parseQuestion'),
     (error: unknown) =>
@@ -514,7 +785,7 @@ await check('a model that never answers is abandoned, and says so', async () => 
   const client = createChatClient({
     baseUrl: 'https://api.deepseek.com',
     model: 'm',
-    apiKey: null,
+    headers: {},
     timeoutMs: 30,
     fetch,
   });
@@ -529,7 +800,7 @@ await check('a network that is not there is reported rather than thrown raw', as
   const { fetch } = recordingFetch(() => {
     throw new TypeError('fetch failed');
   });
-  const client = createChatClient({ baseUrl: 'https://api.deepseek.com', model: 'm', apiKey: null, fetch });
+  const client = createChatClient({ baseUrl: 'https://api.deepseek.com', model: 'm', headers: {}, fetch });
   await assert.rejects(
     () => client.askJson(SAY_SOMETHING, 'respond'),
     (error: unknown) =>
@@ -568,7 +839,7 @@ function canned(answer: string): { operations: LlmOperations; calls: RecordedCal
   const client = createChatClient({
     baseUrl: 'https://api.deepseek.com',
     model: 'deepseek-flash',
-    apiKey: 'sk-secret',
+    headers: bearer('sk-secret'),
     fetch,
   });
   // A pinned clock, so "today" is a fact of the check rather than of the day it
@@ -795,7 +1066,7 @@ await check('every operation’s failure names the operation that failed', async
   const client = createChatClient({
     baseUrl: 'https://api.deepseek.com',
     model: 'm',
-    apiKey: null,
+    headers: {},
     fetch,
   });
   const operations = createLlmOperations({ client });
@@ -1037,6 +1308,52 @@ await check('all nine operations are there, whichever halves are configured', ()
   }
 });
 
+await check('a preset plus a key is the whole wiring: the request goes to that vendor', async () => {
+  // Every cloud row, not a sample: this is the check that a preset is a table
+  // row rather than a branch. Gemini and opencode have no key on this machine,
+  // so what is asserted is the request shape the injected `fetch` receives.
+  const vendors = [
+    ['deepseek', 'https://api.deepseek.com/chat/completions', 'deepseek-flash'],
+    [
+      'gemini',
+      'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
+      'gemini-3.8-flash',
+    ],
+    ['opencode', 'https://opencode.ai/zen/v1/chat/completions', 'deepseek-v4-flash'],
+  ] as const;
+
+  for (const [preset, url, model] of vendors) {
+    const { fetch, calls } = recordingFetch(() => completion('{ "reply": "嗯。" }'));
+    const { provider } = createRealProvider({
+      config: configFrom({
+        YTwins_LLM_PRESET: preset,
+        YTwins_LLM_API_KEY: `sk-${preset}`,
+        // The header opencode's Go/Zen tier wants, as configuration rather than
+        // as a branch somewhere in the call path.
+        YTwins_LLM_HEADERS: 'x-opencode-session=sess-1',
+      }),
+      fetch,
+    });
+
+    const result = await provider.respond({
+      body: '好累',
+      brief: { emotionPresent: true, adviceRequested: false },
+      instructions: [],
+    });
+    assert.equal(result.reply, '嗯。');
+
+    const [call] = calls;
+    assert.equal(call?.url, url, `${preset}: the endpoint is the preset's`);
+    assert.equal(call?.body['model'], model, `${preset}: and so is the model`);
+    assert.equal(
+      call?.headers['authorization'],
+      `Bearer sk-${preset}`,
+      `${preset}: and so is where the key goes`,
+    );
+    assert.equal(call?.headers['x-opencode-session'], 'sess-1', `${preset}: extra headers ride along`);
+  }
+});
+
 await check('a cloud LLM with no key is not a crash: each call says what is missing', async () => {
   const { provider, notes } = createRealProvider({
     config: configFrom({}),
@@ -1105,6 +1422,19 @@ await check('a local LLM needs no key, and a local embedding says where its file
   assert.ok(said.includes(DEFAULT_LOCAL_EMBEDDING_MODEL), 'the embedding model is named');
   assert.ok(said.includes(join(REPO_ROOT, 'data', 'models')), 'and where it will be cached');
   assert.ok(!said.includes('YTwins_LLM_API_KEY'), 'and no key is asked for');
+});
+
+await check('the log says the embedding half is not a preset, and what a swap would cost', () => {
+  const { notes } = createRealProvider({
+    config: configFrom({ YTwins_LLM_API_KEY: 'sk-secret' }),
+  });
+  const embedding = notes.find((note) => note.includes('embedding'));
+  assert.ok(embedding !== undefined, 'the embedding half is reported');
+  assert.ok(
+    embedding.includes('标定'),
+    'the one thing ticket 16 excludes has to be said at startup, not only in .env.example',
+  );
+  assert.ok(!embedding.includes('sk-secret'));
 });
 
 await check('the halves are independent: a broken embedding still leaves the model working', async () => {

@@ -160,6 +160,23 @@ ticket 13 开工前跑过两条路（记录在 ticket 13 的 `## Comments`）：
 所以：**演示走预置 provider，产品默认仍是真实 provider**（`YTwins_PROVIDER` 不设就是真实）。
 真实链路的手工冒烟用 `npm run smoke`。
 
+**换一家模型 = 改一行 + 填一个 key（ticket 16）。** `.env` 里只需两行：`YTwins_LLM_PRESET=` 后面写
+`deepseek` / `gemini` / `opencode` / `ollama` / `custom` 之一，`YTwins_LLM_API_KEY=` 后面写这一家的 key。
+预设自带**端点、默认模型、key 放在哪个头里**（deepseek / gemini / opencode / custom 都是
+`Authorization: Bearer`；ollama 跑在本机、不需要 key），所以换家不用改调用路径，只改这一行的值。
+预设表与每一条的出处写在 `.env.example` 与 `src/ai/config.ts` 的注释里。
+
+- `YTwins_LLM_BASE_URL` / `YTwins_LLM_MODEL` / `YTwins_LLM_HEADERS` 仍然可用，且**优先于预设** ——
+  启动日志会点名说出「预设是哪家、哪些值被显式覆盖了」，覆盖不该是静默的配置漂移。
+- `YTwins_LLM` 在选了预设时**只能与预设一致**（把自己说成本机、端点却是云端的，会**响亮拒绝**：
+  那等于告诉用户「你的话没离开这台机器」）；`custom` 例外，它靠这一行说明那个端点在不在本机。
+- opencode 一类还要额外头的端点，用 `YTwins_LLM_HEADERS=x-opencode-session=…` 配；**头的值绝不进日志**
+  （日志只说配了几个头），头名不合法（含空格／冒号、想顶替 `content-type`／`accept`、或在已配 key 时
+  想顶替 key 的那个头）会**响亮拒绝**。
+- **embedding 不在「只填一个 key」这个承诺里。** 链接阈值是对着具体 embedding 标定过的（ticket 14
+  实测：换成 `bge-small-zh-v1.5` 会让真相关对从 0.875 掉到 0.456），所以本地模型仍是默认，
+  云端 embedding 仍要显式给端点与 key，换之前要重跑那套标定 —— 启动日志每次都会说这一句。
+
 ## 8. 产品本身：一个框（ticket 15）
 
 同一个服务上的另一页：根路径 `http://127.0.0.1:5273/`。**只有一个输入框** —— 没有页签、没有单独的

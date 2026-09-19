@@ -13,9 +13,15 @@
  * The endpoint is not hard-coded. `baseUrl` is whatever an OpenAI-compatible
  * server answers on — DeepSeek's `https://api.deepseek.com`, an OpenAI-compatible
  * cloud, or Ollama's `http://127.0.0.1:11434/v1` — and `/chat/completions` is
- * appended to it. The local option is why nothing here assumes a key exists:
- * `apiKey: null` sends no `Authorization` header at all, which is what a local
- * model expects.
+ * appended to it.
+ *
+ * **This module knows no vendor, and no key.** It is handed a base URL, a model
+ * and a set of request headers, and it sends them: where a key goes, which
+ * header carries it and whether there is one at all are decisions
+ * `src/ai/config.ts` made from the preset this machine chose. That is what
+ * keeps a fourth vendor a row in a table rather than a branch in the call path
+ * — and why a local endpoint, which wants no header, is not a special case here
+ * but simply `headers: {}`.
  *
  * **`fetch` is injected.** Not for tidiness: it is the one thing standing
  * between this code and a network, and a check that could not replace it could
@@ -26,7 +32,7 @@
  * @module ai/openai-chat
  */
 
-import { DEFAULT_TIMEOUT_MS } from './config.ts';
+import { DEFAULT_TIMEOUT_MS, PROTOCOL_HEADERS } from './config.ts';
 import { ProviderCallError, isTimeoutError, shorten } from './errors.ts';
 import { readJsonObject } from './structured.ts';
 
@@ -41,8 +47,14 @@ export interface ChatClientOptions {
   /** The base URL. `/chat/completions` is appended; a trailing slash is fine. */
   readonly baseUrl: string;
   readonly model: string;
-  /** The secret, or null for an endpoint that wants no key (a local one). */
-  readonly apiKey: string | null;
+  /**
+   * The request headers this endpoint wants beyond the protocol's own — the
+   * key's header among them, if there is a key.
+   *
+   * Values are secrets and are never logged. Empty is a real answer, and the
+   * only one a local endpoint has: this client sends exactly what it is handed.
+   */
+  readonly headers: Readonly<Record<string, string>>;
   /** How long one call may take. Defaults to two minutes. */
   readonly timeoutMs?: number;
   /** The transport. Defaults to the global `fetch`; injected by tests. */
@@ -105,12 +117,13 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
   const url = `${options.baseUrl.replace(/\/+$/u, '')}/chat/completions`;
 
   const headers: Record<string, string> = {
-    'content-type': 'application/json',
-    accept: 'application/json',
+    // Whatever was handed in, then the protocol's own two — which are the same
+    // two objects the configuration refuses to let anyone configure, so there
+    // is one list of them rather than a promise that two lists agree. Last, so
+    // that a caller cannot make this client claim a body it is not sending.
+    ...options.headers,
+    ...PROTOCOL_HEADERS,
   };
-  // Only when there is a key: an empty `Bearer ` on a local endpoint is a
-  // header the server has to decide what to do about, and some reject it.
-  if (options.apiKey !== null) headers['authorization'] = `Bearer ${options.apiKey}`;
 
   return {
     async askJson(messages, operation) {

@@ -193,8 +193,17 @@ _最后更新：2026-09-19_
   `check-workspace` clean，并在真实 DeepSeek + 本地 embedding 上手工走完四种输入（原始输出在
   `archive/ytwins-15-one-box/`，不进 git）。**顺手修了一处**：`tools/e2e-ticket-04.mjs` 从 14 起就是红的
   （夹具还用余弦 0.8 表示灰区，而 0.8 已落在「不连」那一档），按 14 在领域测试里做过的同一处改动修好。
-- **01–15 全部完成**；`16`（一家模型一个预设：选 preset + 填 key 就能换后端）
-  已开、`Status: ready-for-agent` —— 它是这个 effort 当前排队的下一张。
+- **16 已实现**，`Status: ready-for-human`：**一个 key 换一家模型**。`YTwins_LLM_PRESET`（deepseek / gemini /
+  opencode / ollama / custom）+ `YTwins_LLM_API_KEY` 就是全部；三家差异落成 `src/ai/config.ts` 的
+  `LLM_PRESETS` 五行（`kind` / `baseUrl` / `model` / `auth` / `headers`），**`openai-chat.ts` 的 `apiKey`
+  字段删掉了** —— 它只认「base URL + model + 一组头」，厂家知识一个字节都没漏进调用路径。
+  `YTwins_LLM_HEADERS`（`name=value;name=value`）管额外头，值绝不进日志（连被拒的那段也不回显）。
+  `YTwins_LLM` 在选了预设时**只能与预设一致**（把云端端点说成「本机」会响亮拒绝，`custom` 例外）。
+  **embedding 不在这个承诺里**（换它等于换一套标定），`.env.example` 与**每次启动日志**都写了这一句。
+  真实 DeepSeek 跑了 `smoke llm` **7/7**；Gemini / opencode 没有 key，用注入 `fetch` 断言请求形状
+  （票面明记「未用真 key 验过」）。provider 58 → **72**、领域 167/167 一行未改、e2e 02–15 全绿、`tsc` 干净。
+  这台机器 `.env` 顺手修好了（`PRESET=deepseek` + 那把 key，见下）。
+- **01–16 全部完成**；`16` 只剩作者人工验收。
 
 这个仓库的第一个 effort slug 是 `ytwins`（`.scratch/ytwins/`、`docs/ytwins/`）。将来另开 effort 时再取新 slug。
 
@@ -218,12 +227,16 @@ _最后更新：2026-09-19_
    本身（`/`），两者共用同一个领域接口、互不影响。两条待定的取舍**现在都有了答案**：判据走 ①（代码看形态
    + 拿不准才问模型），「先追溯还是先 moment」这条倾向被真实链路推翻、改成 `self` 只走 moment ——
    过程、证据与检查清单见 `15` 的 Comments。**接下来先看 16**；`15` 只等作者人工验收。
-3. **`16` 排在 15 后面**：**一家模型一个预设 —— 选 `YTwins_LLM_PRESET` + 填 `YTwins_LLM_API_KEY` 就能换后端**
-   （作者 2026-09-18 的口径：为 Gemini、opencode、DeepSeek 等各留一个端口，用什么模型只需输入 api key）。
-   预设表、三家的一手事实（Gemini 的 OpenAI 兼容基址要带 `/openai/`；opencode Zen 只承诺 `chat/completions`
-   那一档；DeepSeek 本机 `GET /models` 实测 200）与「额外请求头是预设的一个字段」都写在票里。
+3. **`16` 已完成（2026-09-18）**：**一家模型一个预设 —— 选 `YTwins_LLM_PRESET` + 填 `YTwins_LLM_API_KEY`
+   就能换后端**（作者 2026-09-18 的口径：为 Gemini、opencode、DeepSeek 等各留一个端口，用什么模型只需输入
+   api key）。预设表、三家的一手事实（Gemini 的 OpenAI 兼容基址要带 `/openai/`、其示例模型复核时已是
+   `gemini-3.8-flash`；opencode Zen 只承诺 `chat/completions` 那一档、DeepSeek 行是 `deepseek-v4-flash`；
+   DeepSeek 本机 `GET /models` 实测 200）与「额外请求头是预设的一个字段」都写在票里与
+   `src/ai/config.ts` 的注释里。落点：`config.ts` 的表 + `openai-chat.ts` 不再认识 key + `real-provider.ts`
+   把 `headers` 交出去并把缺 key 说成「预设 X 的 Y 用不了」。
    **embedding 那一半明确不在「只填 key」的承诺内** —— 换 embedding 等于换一套标定（14 实测：换
-   `bge-small-zh-v1.5` 会让真相关对从 0.875 掉到 0.456）。
+   `bge-small-zh-v1.5` 会让真相关对从 0.875 掉到 0.456），启动日志每次都会说这一句。
+   实现细节与两轴评审的处理见 `16` 的 Comments。
 4. **14 顺带查出的两件事，一件已记、一件待办：**
    - **待办（下一张候选票）**：真链路上剩下的假边，来源不是阈值，是**读出来的词条形状** ——
      真实读法把整句抽成词条（`这周总是睡不好`），它跟什么都像（`× 平时分 40%` 0.874、`× 下周三交提纲` 0.880、
@@ -232,18 +245,19 @@ _最后更新：2026-09-19_
      要修的是「词条该有多长/什么形状」。证据在 `14` 的 Comments 与
      `archive/ytwins-14-calibration/real-chain-run.txt`（**`archive/` 不进 git**，
      脚本与原始输出只在这台机器上；方法、样本与全部数值写在 `14` 的 Comments 里，clone 之后照它重建即可）。
-   - **已记（机器配置，本票没改）**：仓库根 `.env` 现在是坏的 —— key 是能用的 DeepSeek key（`api.deepseek.com`
+   - **已修（`16` 落地时顺手改的）**：仓库根 `.env` 当时是坏的 —— key 是能用的 DeepSeek key（`api.deepseek.com`
      200），端点却填了 `generativelanguage.googleapis.com` + `gemini-flash-lite-latest`，于是每个 LLM 调用
-     都 400，而域侧把读失败静默吞掉（表现：投递了但一个词条都读不出来）。14 的验证是**临时用环境变量**
-     指向 `https://api.deepseek.com` 跑的（环境变量优先于 `.env`）。**要不要把 `.env` 改回 DeepSeek 由作者定**；
-     `16` 的通道与这处配置是两件事。
+     都 400，而域侧把读失败静默吞掉（表现：投递了但一个词条都读不出来）。**现在 `.env` 是
+     `YTwins_LLM_PRESET=deepseek` + 那一把 key 两行**（旧的端点与模型两行删掉），真实冒烟 7/7 走的就是它。
+     `.env` 不进 git，换机器时照 `.env.example` 重建即可。
 5. **演示走哪条 provider 已经有答案（2026-09-17 实测，见 ticket 13 的 Comments 第 8 条）**：演示用
    `YTwins_PROVIDER=demo`（预置素材、逐字可重复、离线、免费）；真实 provider 仍是**产品默认**。
    `demo-provider.ts` 已并入 `src/domain/preset.ts`，`YTwins_PROVIDER=demo` 这个开关**继续留着**，
    它现在是三幕 demo 的正门，而不是 01–11 的临时假件。真实链路要调的是它的**语义**（措辞每次不同、
    同一件事要现场说够三次、跟在投递后的那次判定会撞上「读出 vs 归并」的窗口）—— 14 只管链接那一半。
-6. spec 里那处**只有人能做**的事（云端 LLM 的 API key）已经在 2026-09-17 就位：仓库根 `.env` 一行
-   `YTwins_LLM_API_KEY=…`（`.env` 不进 git，模板是 `.env.example`）。第一把 key 其实是别家的
+6. spec 里那处**只有人能做**的事（云端 LLM 的 API key）已经在 2026-09-17 就位：仓库根 `.env`（`.env` 不进
+   git，模板是 `.env.example`）。**`16` 之后它只有两行**：`YTwins_LLM_PRESET=deepseek` +
+   `YTwins_LLM_API_KEY=…` —— 换一家就是改第一行的值。第一把 key 其实是别家的
    （`api.deepseek.com` 返 401、`opencode.ai/zen/go/v1` 要 `x-opencode-session`），换过一把 ——
    过程见 ticket 12 的 `## Comments` 第 4 条。**14 发现这把 key 本身是好的**（DeepSeek 认，models 列得出
    `deepseek-flash` / `deepseek-v4-pro`），坏的是同文件里的端点与模型名，见上一条。

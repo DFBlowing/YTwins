@@ -183,6 +183,28 @@ Both routes were run before ticket 13 was implemented (the record is in the tick
 So: **the demo runs on the preset provider, and the product still defaults to the real one** (leave
 `YTwins_PROVIDER` unset for real). The real chain's manual smoke is `npm run smoke`.
 
+**Switching vendor is one line plus one key (ticket 16).** `.env` needs exactly two: `YTwins_LLM_PRESET=`
+followed by one of `deepseek` / `gemini` / `opencode` / `ollama` / `custom`, and `YTwins_LLM_API_KEY=`
+followed by that vendor's key. A preset carries the **endpoint, the default model and where the key goes**
+(`Authorization: Bearer` for deepseek / gemini / opencode / custom; ollama runs on this machine and wants
+no key), so changing vendor changes a value rather than a call path. The table and each row's provenance
+are in `.env.example` and in the doc comment of `src/ai/config.ts`.
+
+- `YTwins_LLM_BASE_URL` / `YTwins_LLM_MODEL` / `YTwins_LLM_HEADERS` still exist and still **win over the
+  preset** — the startup log names which of them did, because an override nobody can see is configuration
+  drift. It also says which vendor the preset was and whether a key is configured.
+- With a preset chosen, `YTwins_LLM` may only **agree** with it: calling a cloud endpoint "local" is
+  **refused loudly**, because it would tell the user their words never left the machine. `custom` is the
+  exception — that row is the one place where the variable is the only thing that can know.
+- An endpoint that wants a header of its own (opencode's `x-opencode-session`) is configured with
+  `YTwins_LLM_HEADERS=x-opencode-session=…`. **Header values never reach the log** (it prints a count),
+  and an illegal name — a space or a colon in it, one trying to take over `content-type` / `accept`, or
+  one trying to take over the key's header while a key is configured — is refused loudly.
+- **The embedding half is not part of the "one key" promise.** The link thresholds were calibrated against
+  one embedding (ticket 14 measured a true pair falling from 0.875 to 0.456 when it was swapped to
+  `bge-small-zh-v1.5`), so the local model stays the default, a cloud embedding still needs an explicit
+  endpoint and key, and swapping it means redoing that calibration — the startup log says so every time.
+
 ## 8. The product itself: one box (ticket 15)
 
 The other page on the same server: the root path, `http://127.0.0.1:5273/`. **One input box** — no tabs,
