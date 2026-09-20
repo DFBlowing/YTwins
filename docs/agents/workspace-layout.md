@@ -31,6 +31,11 @@
 （或 `pnpm-lock.yaml`）、`tsconfig.json`、`vite.config.ts`。它们不是一个「层」，只是工程的入口配置，
 所以不适用上面那张表的判据。
 
+`README.md` 同属这一类，理由一样是**位置本身就是输入**：**GitHub 只把仓库根的那份渲染成仓库首页**，
+放进 `docs/` 或 `projects/` 都不显示。它跟着一份英文对照 `README.en.md` —— 那是 `AGENTS.md` 语言策略
+要求的；注意 `projects/` 的总览**不**适用这一条，那一层只留中文一份。README 是**导航页**，不是第二份
+说明书：怎么用产品一律指向 `projects/YTwins-使用手册.md`，正文只留「这是什么 + 三行上手 + 去哪找」。
+
 `.env.example` 也在这里，理由同样是**位置本身就是输入**：服务端从 `<仓库根>/.env` 读云端 LLM 的
 key（`src/ai/env-file.ts`），所以模板必须摆在那个人被要求创建的文件旁边；真正的 `.env` 被 git 忽略，
 在受管理的文件里根本看不到它（ticket 12 加的，见该 ticket 的 `## Comments`）。

@@ -156,6 +156,13 @@ test('skills-lock.json is a protocol file and is allowed at the root', () => {
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test('the README and its English pair are allowed at the root', () => {
+  const root = fixture({ ...CLEAN, 'README.md': null, 'README.en.md': null });
+  try {
+    assert.deepEqual(checkWorkspace(root), []);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('an English pair for a projects overview is a violation', () => {
   const root = fixture({ ...CLEAN, 'projects/ytwins.en.md': null });
   try {

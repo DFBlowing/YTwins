@@ -22,9 +22,14 @@ import { fileURLToPath } from 'node:url';
  *  because the server reads its key from `<root>/.env` (see
  *  `src/ai/env-file.ts`): that path is a toolchain input, and this checker walks
  *  the filesystem rather than git, so the ignored `.env` is visible to it even
- *  though it is not in the repository. */
+ *  though it is not in the repository. `README.md` sits here for the same reason
+ *  `vite.config.ts` does: GitHub renders the repo-root README as the landing page,
+ *  so no layer can hold it. `README.en.md` rides along as the English counterpart
+ *  the language policy in `AGENTS.md` asks for — the one pair `projects/` is
+ *  explicitly exempt from. */
 const ROOT_ALLOWED_FILES = new Set([
   'AGENTS.md', 'CLAUDE.md', 'CONTEXT.md', 'CONTEXT-MAP.md', '.gitignore', 'skills-lock.json',
+  'README.md', 'README.en.md',
   'package.json', 'package-lock.json', 'pnpm-lock.yaml', 'tsconfig.json',
   'vite.config.ts', '.env', '.env.example',
 ]);
