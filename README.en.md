@@ -4,7 +4,7 @@
 > offhand, it catches them, quietly turns the fragments into small conclusions where you cannot
 > see it, and once there is enough, surfaces one sentence in an uncertain tone at a chosen moment.
 
-**Status: early.** The end goal is a phone app; today it starts as a web demo. The only user is the author.
+**Status: early.** 
 
 ## What this is
 
